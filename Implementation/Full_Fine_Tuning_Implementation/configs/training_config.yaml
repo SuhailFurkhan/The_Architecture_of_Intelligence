@@ -1,0 +1,47 @@
+# ============================================================
+# Full Fine-Tuning Configuration for RTX 3090 (24GB)
+# ============================================================
+
+# --- Model ---
+model_name: "unsloth/Llama-3.2-1B-Instruct"         # 1.24B params, ungated mirror, fits on RTX 3090
+# Alternatives that also fit on 24GB:
+#   "meta-llama/Llama-3.2-1B-Instruct"              # 1.24B, official (gated — requires approval)
+#   "Qwen/Qwen2.5-1.5B-Instruct"                    # 1.5B, Apache 2.0
+#   "TinyLlama/TinyLlama-1.1B-Chat-v1.0"            # 1.1B, easier fit
+#   "HuggingFaceTB/SmolLM2-360M-Instruct"            # 360M, very comfortable
+#   "openai-community/gpt2"                           # 124M, for testing pipeline
+
+# --- Dataset ---
+dataset_name: "yahma/alpaca-cleaned"         # 52K instruction examples
+max_seq_length: 512                          # Keep short to save VRAM (increase if you have headroom)
+train_split: "train[:90%]"
+eval_split: "train[90%:]"
+
+# --- Training Hyperparameters ---
+num_train_epochs: 3
+per_device_train_batch_size: 1               # MUST be 1 for 3090 with 1B model
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8               # Effective batch size = 1 x 8 = 8
+learning_rate: 2.0e-5                        # Lower than QLoRA (we're moving ALL weights)
+weight_decay: 0.01
+warmup_ratio: 0.03
+lr_scheduler_type: "cosine"
+
+# --- Memory Optimization (critical for 3090) ---
+bf16: true                                   # Use bf16 mixed precision
+gradient_checkpointing: true                 # Trade compute for memory (~40% VRAM savings)
+optim: "adamw_torch_fused"                   # Fused optimizer, slightly more efficient
+
+# --- Logging & Saving ---
+output_dir: "./outputs/llama-3.2-1B-full-ft"
+logging_steps: 10
+eval_strategy: "steps"
+eval_steps: 200
+save_strategy: "steps"
+save_steps: 400
+save_total_limit: 2                          # Keep only 2 checkpoints (disk space)
+
+# --- Other ---
+seed: 42
+dataloader_num_workers: 2
+report_to: "tensorboard"
