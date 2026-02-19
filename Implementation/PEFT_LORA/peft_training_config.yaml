@@ -1,0 +1,162 @@
+# ============================================================
+# PEFT / LoRA Configuration for RTX 3090 (24GB)
+# ============================================================
+#
+# ┌─────────────────────────────────────────────────────────────────┐
+# │  PEFT vs Full Fine-Tuning — What's Different?                   │
+# │                                                                 │
+# │  Full Fine-Tuning:                                              │
+# │    • Trains ALL 1.24B parameters                                │
+# │    • VRAM: ~18-22 GB for 1B model                               │
+# │    • Saves ~2.5 GB (entire model)                               │
+# │    • Risk of catastrophic forgetting                            │
+# │                                                                 │
+# │  PEFT / LoRA:                                                   │
+# │    • Trains only ~1-5M adapter parameters (< 0.5% of model)    │
+# │    • VRAM: ~8-10 GB for same 1B model                           │
+# │    • Saves ~10-50 MB (adapter weights only)                     │
+# │    • Base model knowledge largely preserved                     │
+# │    • Can run LARGER models on the same hardware!                │
+# └─────────────────────────────────────────────────────────────────┘
+
+# --- Model ---
+model_name: "unsloth/Llama-3.2-1B-Instruct"    # Base model (NOT modified during training)
+# Because we use so little VRAM, we could also try:
+#   "unsloth/Llama-3.2-3B-Instruct"             # 3B — fits easily with LoRA on 3090
+#   "unsloth/Meta-Llama-3.1-8B-Instruct"        # 8B — also fits with LoRA on 3090!
+#   "Qwen/Qwen2.5-7B-Instruct"                  # 7B — very capable
+
+# --- Dataset ---
+dataset_name: "yahma/alpaca-cleaned"            # Same 52K instruction examples
+max_seq_length: 512
+train_split: "train[:90%]"
+eval_split:   "train[90%:]"
+
+# ============================================================
+# LoRA Adapter Configuration
+# ============================================================
+#
+# LoRA (Low-Rank Adaptation) works by injecting small "adapter" matrices
+# into specific layers of the frozen base model.
+#
+# For a weight matrix W of shape [d_out × d_in]:
+#
+#   Full fine-tuning:   trains W directly  → d_out × d_in parameters
+#   LoRA:               freezes W, adds    → two small matrices A and B
+#                       where A: [r × d_in]  and  B: [d_out × r]
+#
+# Forward pass with LoRA:
+#   output = W·x  +  (B · A) · x  ×  (alpha / r)
+#            ↑              ↑
+#       frozen base    trainable delta (rank-r approximation)
+#
+# Why does this work?
+#   The hypothesis is that fine-tuning updates have low "intrinsic rank"
+#   — they live in a small subspace. LoRA captures that subspace cheaply.
+#
+# Parameter count example for q_proj in Llama-3.2-1B (d=2048):
+#   Full:  2048 × 2048 = 4,194,304 parameters
+#   LoRA:  (16 × 2048) + (2048 × 16) = 65,536 parameters  → 64x fewer!
+
+lora_r: 16                      # Rank — the width of the low-rank bottleneck.
+                                # Higher = more capacity, more VRAM, better fitting.
+                                # Typical values: 8, 16, 32, 64
+                                # Rule of thumb: start at 16, double if underfitting.
+
+lora_alpha: 32                  # Scaling factor for the LoRA update.
+                                # The effective scale = lora_alpha / lora_r = 2.0
+                                # Higher alpha = larger updates, more aggressive learning.
+                                # Common practice: set alpha = 2 × r (so scale ≈ 2).
+
+lora_dropout: 0.05              # Dropout applied to the LoRA layers (regularization).
+                                # 0.0 = no dropout (fine for small datasets)
+                                # 0.05-0.1 = light regularization (good default)
+
+lora_bias: "none"               # Whether to train bias parameters.
+                                # "none"  = don't train any biases (recommended)
+                                # "all"   = train all biases
+                                # "lora_only" = train only biases in LoRA layers
+
+lora_target_modules:            # Which weight matrices get LoRA adapters.
+  - "q_proj"                    # Query projection in attention
+  - "k_proj"                    # Key projection in attention
+  - "v_proj"                    # Value projection in attention
+  - "o_proj"                    # Output projection in attention
+  - "gate_proj"                 # FFN gate (SwiGLU first half)
+  - "up_proj"                   # FFN up projection (SwiGLU second half)
+  - "down_proj"                 # FFN down projection
+#
+# Architecture reference for Llama-3.2-1B (16 transformer layers):
+#
+#   Each layer contains:
+#     self_attn:
+#       q_proj:    [2048 → 2048]  ← LoRA here
+#       k_proj:    [2048 → 256]   ← LoRA here (GQA: 8 KV heads vs 32 Q heads)
+#       v_proj:    [2048 → 256]   ← LoRA here
+#       o_proj:    [2048 → 2048]  ← LoRA here
+#     mlp:
+#       gate_proj: [2048 → 8192]  ← LoRA here
+#       up_proj:   [2048 → 8192]  ← LoRA here
+#       down_proj: [8192 → 2048]  ← LoRA here
+#
+# Minimal variant (attention-only — faster, less capacity):
+# lora_target_modules: ["q_proj", "v_proj"]
+#
+# Total trainable params with all 7 modules at r=16:
+#   q_proj:    (16×2048 + 2048×16) × 16 layers = 1,048,576
+#   k_proj:    (16×256  + 256×16)  × 16 layers = 131,072
+#   v_proj:    (16×256  + 256×16)  × 16 layers = 131,072
+#   o_proj:    (16×2048 + 2048×16) × 16 layers = 1,048,576
+#   gate_proj: (16×2048 + 8192×16) × 16 layers = 2,621,440
+#   up_proj:   (16×2048 + 8192×16) × 16 layers = 2,621,440
+#   down_proj: (16×8192 + 2048×16) × 16 layers = 2,621,440
+#   ────────────────────────────────────────────────────────
+#   TOTAL:  ~10.2M trainable parameters  (vs 1,240M for full fine-tuning)
+#   That's 0.82% of the model — a 120x reduction!
+
+task_type: "CAUSAL_LM"         # Required by PEFT library — tells it the model type.
+
+# ============================================================
+# Training Hyperparameters
+# ============================================================
+#
+# NOTICE: We can afford HIGHER learning rates with LoRA!
+# With full fine-tuning, a large LR can destroy pretrained knowledge.
+# With LoRA, the base model is frozen, so only adapters move.
+# This makes LoRA more robust to aggressive LR settings.
+
+num_train_epochs: 3
+per_device_train_batch_size: 4           # We can do batch_size=4 now (much less VRAM)
+per_device_eval_batch_size: 4
+gradient_accumulation_steps: 4           # Effective batch size = 4 × 4 = 16
+learning_rate: 2.0e-4                    # 10× higher than full fine-tuning (safe with LoRA)
+weight_decay: 0.01
+warmup_ratio: 0.03
+lr_scheduler_type: "cosine"
+
+# --- Memory Optimization ---
+bf16: true
+gradient_checkpointing: true            # Still useful even with LoRA (saves activation memory)
+optim: "adamw_torch_fused"
+
+# --- Logging & Saving ---
+output_dir: "./outputs/llama-3.2-1B-lora"
+logging_steps: 10
+eval_strategy: "steps"
+eval_steps: 200
+save_strategy: "steps"
+save_steps: 400
+save_total_limit: 2
+
+# LoRA-specific save options
+save_adapter_only: true     # Save only the adapter (~10-50 MB) not the full model (~2.5 GB)
+                            # Set to false if you want a fully merged, standalone model.
+merge_before_save: false    # If true: merge LoRA weights into base model before saving.
+                            # Merged model = standalone (no PEFT library needed for inference).
+                            # Unmerged adapter = tiny file but needs base model at inference time.
+
+# --- Other ---
+seed: 42
+dataloader_num_workers: 2
+report_to: "tensorboard"
+save_dataset_locally: false

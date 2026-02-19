@@ -1,0 +1,44 @@
+# ============================================================================ #
+#                              REQUIREMENTS.TXT                                #
+#                         Full Fine-Tuning LLM Project                         #
+# ============================================================================ #
+
+
+# ── PyTorch (CUDA 12.1) ─────────────────────────────────────────────────────
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130
+
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch==2.3.1
+torchvision==0.18.1
+
+
+# ── Hugging Face / Training ─────────────────────────────────────────────────
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.28.0
+safetensors>=0.4.0
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+
+# ── LLM APIs ────────────────────────────────────────────────────────────────
+anthropic>=0.18.0
+openai>=1.12.0
+
+
+# ── Web UI ──────────────────────────────────────────────────────────────────
+streamlit>=1.30.0
+
+
+# ── Scientific / Data ───────────────────────────────────────────────────────
+numpy>=1.24.0
+scipy
+matplotlib>=3.7.0
+Pillow>=10.0.0
+
+
+# ── Utilities ───────────────────────────────────────────────────────────────
+python-dotenv>=1.0.0
+pyyaml>=6.0
+tensorboard>=2.15.0
+dotenv

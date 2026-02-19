@@ -1,0 +1,22 @@
+# =============================================================================
+# Streamlit Dev Configuration
+# Place this folder (.streamlit/) in the same directory as app.py
+# =============================================================================
+
+[server]
+# Auto-rerun the app whenever a source file changes
+runOnSave = true
+
+# File watcher type: "auto" uses watchdog if available, falls back to polling
+fileWatcherType = "auto"
+
+# Allow the app to be accessed from other devices on the network
+# headless = true
+
+[client]
+# Show detailed error traces in the browser (useful during development)
+showErrorDetails = true
+
+[browser]
+# Prevent Streamlit from auto-opening a new browser tab on launch
+# gatherUsageStats = false
