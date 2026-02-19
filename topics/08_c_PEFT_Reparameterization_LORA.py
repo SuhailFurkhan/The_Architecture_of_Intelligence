@@ -50,7 +50,7 @@ PEFT just redecorates specific rooms — same structural integrity, fraction of 
     │ while freezing   │ │ low-rank matrices │ │ freeze the rest      │ │ (e.g. quantize   │ │ the input, no     │
     │ originals        │ │                   │ │                      │ │  + adapters)     │ │ weight changes    │
     │                  │ │                   │ │                      │ │                  │ │                   │
-    │ • Bottleneck     │ │ • LoRA  ★         │ │ • BitFit             │ │ • QLoRA  ★       │ │ • Prefix Tuning   │
+    │ • Bottleneck     │ │ • LoRA  *         │ │ • BitFit             │ │ • QLoRA  *       │ │ • Prefix Tuning   │
     │   Adapters       │ │ • DoRA            │ │ • Fish Mask          │ │ • LongLoRA       │ │ • Prompt Tuning   │
     │ • (IA)³          │ │ • LoRA+           │ │ • Diff Pruning       │ │ • LoRA-FA        │ │ • P-Tuning v2     │
     │ • Soft Prompts   │ │ • rsLoRA          │ │                      │ │                  │ │                   │
@@ -188,9 +188,9 @@ The matrix is fat, but the information inside it is slim.
     ΔW is also [4096 × 4096] = 16,777,216 parameters to learn. That's the problem.
 
 
-**In LoRA:**
+**<u>In LoRA: The Core Idea:</u>**
 
-The Core Idea: Decompose ΔW Into Two Tiny Matrices
+**Decompose ΔW Into Two Tiny Matrices**
 Instead of learning the full ΔW, LoRA approximates it as the product of two small matrices:
     
     When you fine-tune a neural network layer, you normally update its weight matrix:
@@ -200,22 +200,21 @@ Instead of learning the full ΔW, LoRA approximates it as the product of two sma
     Where: 
         W_original  → pretrained weights (frozen in LoRA)
         ΔW          → the learned update during fine-tuning
-    
-    
-        
+
     Instead of learning the full ΔW, decompose it:
 
         ΔW ≈ B × A
 
     Where:
-        ΔW = Change in the original weight matrix
-        A is [r × d_in]    →  e.g., [8 × 4096] = 32,768 parameters
-        B is [d_out × r]   →  e.g., [4096 × 8] = 32,768 parameters
+        ΔW   =  Change in the original weight matrix
+        A    =  [r × d_in]    →  e.g., [8 × 4096] = 32,768 parameters
+        B    =  [d_out × r]   →  e.g., [4096 × 8] = 32,768 parameters
         
     In LoRA, we do not learn a full ΔW matrix directly.
     
     Instead we parameterize it as:
-        ΔW=BA
+        
+        ΔW = BA
     
     So fine-tuning becomes:
         
@@ -224,8 +223,8 @@ Instead of learning the full ΔW, LoRA approximates it as the product of two sma
  
     For the same [4096 × 4096] example with r=8:
 
-        A: [8 × 4096] = 32,768 params
-        B: [4096 × 8] = 32,768 params
+        A   :   [8 × 4096]  =   32,768 params
+        B   :   [4096 × 8]  =   32,768 params
         
         Total: 65,536 vs. 16,777,216 — a 256× reduction for one weight matrix.
         
@@ -322,6 +321,8 @@ LoRA uses a very specific initialization strategy:
 
 ### The Scaling Factor α (Alpha)
 
+Alpha (α) is a scaling constant that acts like a volume knob on the adapter's contribution. The actual scaling applied is α/r:
+
 LoRA includes a scaling factor α (alpha) that controls how much the adapters
 contribute to the output:
 
@@ -344,9 +345,27 @@ contribute to the output:
     Rule of thumb: α = r or α = 2r works well for most tasks.
     When you increase r, increase α proportionally to maintain similar scaling.
 
+The reason α exists separately from r is so you can change r without needing to recalibrate the magnitude of updates.
+You fix α and tune r.
+
 ---
 
 ### Which Layers Get LoRA? — Target Modules
+
+**<u>Which Layers to Target</u>**
+
+You choose. The original LoRA paper only targeted W_q and W_v in the attention blocks. Modern practice has evolved:
+
+    Minimal     :   W_q, W_v only
+    Standard    :   W_q, W_k, W_v, W_o (all attention projections)
+    Aggressive  :   all linear layers including the MLP's gate, up, and down projections
+
+For a 32-layer model with standard 4 targets and r=8: that's 256 small matrices, 
+~8.4 million trainable parameters — roughly 0.12% of the 7B model. 
+
+Yet performance on fine-tuning benchmarks is often competitive with full fine-tuning.
+
+---
 
 You don't have to apply LoRA to every weight matrix. In a transformer, the key weight matrices are:
 
@@ -389,9 +408,10 @@ You don't have to apply LoRA to every weight matrix. In a transformer, the key w
     More targets = more trainable parameters = better performance but more memory.
 
     In HuggingFace PEFT config, this looks like:
-        target_modules=["q_proj", "v_proj"]                       # minimal
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]   # standard
-        target_modules="all-linear"                               # aggressive
+    
+        target_modules  =   ["q_proj", "v_proj"]                       # minimal
+        target_modules  =   ["q_proj", "k_proj", "v_proj", "o_proj"]   # standard
+        target_modules  =   "all-linear"                               # aggressive
 
     Each target module in EACH transformer layer gets its own A and B matrices.
     For a 32-layer model with 4 attention targets and rank 8:
@@ -405,19 +425,23 @@ You don't have to apply LoRA to every weight matrix. In a transformer, the key w
     r = 1:    Extremely compressed. Each adapter captures only 1 direction of variation.
               Works for very simple tasks or when data is tiny.
 
-    r = 4:    Very lean. Good for straightforward classification or single-skill tasks.
+    r = 4:    Very lean. Good for straightforward classification or single-skill tasks - simple tasks
 
     r = 8:    The default sweet spot. Works well for most instruction-tuning and chat tasks.
               This is where most practitioners start.
+              Works for most instruction-tuning.
 
     r = 16:   Better for complex tasks requiring nuanced adaptation. 
               Moderate memory increase.
+              More expressive, complex behavioral shifts
 
     r = 32:   Approaching diminishing returns for many tasks.
               Good for very different target domains (e.g., English model → code model).
+              More expressive, complex behavioral shifts
 
     r = 64+:  Rarely needed. If you need this much capacity, consider whether
               full fine-tuning or a larger rank is actually buying you anything.
+              Approaching full fine-tuning territory, diminishing returns
 
     ┌────────────────────────────────────────────────────────────────────────────────────┐
     │                                                                                    │
@@ -509,7 +533,7 @@ This is one of LoRA's killer features: one base model, many tasks.
 
 ---
 
-Step 0: Understand What Problem LoRA Is Solving
+**Step 0: Understand What Problem LoRA Is Solving**
 
 In full fine-tuning, when you update a weight matrix W₀ of shape [4096 × 4096], you're learning a completely new matrix:
 
@@ -553,14 +577,13 @@ You start with a pre-trained model — say LLaMA-2-7B. Every parameter gets froz
 At this point the model is in inference mode. No gradients will be computed for any original weight. 
 This is identical to what Additive PEFT does — the difference comes in Step 2.
 
-
 Load the pre-trained model. Set requires_grad = False on every single parameter. 
 The base model becomes read-only. No gradients will flow through it. 
 This is what eliminates 56 GB of optimizer states and 14 GB of gradients.
 
 ---
 
-Step 2: Attach LoRA Matrices (A and B) to Target Weight Matrices
+**Step 2: Attach LoRA Matrices (A and B) to Target Weight Matrices**
 
 Here's where LoRA diverges from Adapters. Instead of inserting new modules between layers (in-series), 
 LoRA attaches a small parallel bypass alongside existing weight matrices.
@@ -597,16 +620,14 @@ For each weight matrix you choose to adapt (e.g., W_q, W_k, W_v, W_o in every at
 create two new small matrices A and B. These are the only trainable parameters. 
 They sit alongside W₀ as a parallel bypass.
 
-Step 3 — Initialize Carefully (This Is Critical)
+**Step 3: Initialize A and B — This Is Critical**
 
-A → initialized with small random Gaussian values
-B → initialized to all zeros
+Initialize Carefully (This Is Critical)
 
-At training step zero: ΔW = B × A = 0 × A = 0. So the effective weight is exactly W₀ + 0 = W₀. The model starts identically to the pre-trained checkpoint. No pre-trained knowledge is disrupted. As training progresses, B learns non-zero values and the adapters gradually steer behavior. If both A and B were randomly initialized, you'd be injecting random noise into every layer from the start — potentially catastrophic.
+    A → initialized with small random Gaussian values
+    
+    B → initialized to all zeros
 
----
-
-Step 3: Initialize A and B — This Is Critical
 
 LoRA uses a very specific initialization:
 
@@ -620,17 +641,28 @@ Why does B start at zero? Because at training step 0:
 
     So: W_effective = W₀ + ΔW = W₀ + 0 = W₀
 
+A is initialized with small random Gaussian values. B is initialized to all zeros.
+This ensures ΔW = B × A = 0 at step 0, so the model starts exactly as the pre-trained checkpoint
+with no disruption to pre-trained knowledge. See Diagram 3 below for the full visual breakdown.
+
+Explanation 2:
 The model starts exactly as the pre-trained model. The LoRA adapters contribute nothing initially. 
 Training begins from a known-good state — the pre-trained model's behavior is perfectly preserved at step 0.
-
 If both A and B were randomly initialized, B × A would produce random noise added to every weight matrix, 
 potentially destroying the pre-trained knowledge immediately.
-
 As training progresses, B learns non-zero values and the product B × A gradually steers the model toward the new task.
+
+Explanation 3:
+At training step zero: ΔW = B × A = 0 × A = 0. So the effective weight is exactly W₀ + 0 = W₀. 
+The model starts identically to the pre-trained checkpoint. No pre-trained knowledge is disrupted. 
+As training progresses, B learns non-zero values and the adapters gradually steer behavior. 
+If both A and B were randomly initialized, you'd be injecting random noise into every layer from the start — potentially catastrophic.
+
+
 
 ---
 
-Step 4: Prepare the Data (Identical to Full Fine-Tuning)
+**Step 4: Prepare the Data (Identical to Full Fine-Tuning)**
 
 The data pipeline is completely unchanged from full fine-tuning. 
 LoRA doesn't change what goes into the model, only what happens inside it.
@@ -708,7 +740,7 @@ LoRA doesn't change what goes into the model, only what happens inside it.
 
 ---
 
-Step 5: Forward Pass — Where LoRA Changes Things
+**Step 5: Forward Pass — Where LoRA Changes Things**
 
     This is where LoRA diverges. In full fine-tuning, the forward pass through a weight matrix is:
 
@@ -797,7 +829,7 @@ Step 5: Forward Pass — Where LoRA Changes Things
 
 ---
 
-Step 6: Loss Computation (Identical to Full Fine-Tuning)
+**Step 6: Loss Computation (Identical to Full Fine-Tuning)**
 
     logits = model output: [batch_size, seq_len, 32000]    (32000 = vocab size)
     labels = [-100, -100, ..., -100, 6374, 2]              (-100 = ignore)
@@ -811,7 +843,7 @@ Nothing changes here between LoRA and full fine-tuning. Same loss function, same
 
 ---
 
-Step 7: Backward Pass — Where the Memory Savings Happen
+**Step 7: Backward Pass — Where the Memory Savings Happen**
 
 This is the key step. loss.backward() triggers backpropagation.
 
@@ -850,9 +882,14 @@ In LoRA:
     frozen weights — the computation happens — but the gradient tensors for the frozen weights themselves are never allocated or stored. 
     The frozen weights are treated as constants in the computation graph.
 
+
+The data pipeline, tokenization, loss masking, and training loop are identical to full fine-tuning. 
+The only difference is which parameters receive gradient updates.
+Gradients flow back through the output, through B, through A — and stop there. W₀ never accumulates a gradient.
+
 ---
 
-Step 8: Optimizer Update — Only Adapters Move
+**Step 8: Optimizer Update — Only Adapters Move**
 
     optimizer = AdamW(model.parameters(), lr=2e-4)   
     # BUT only params with requires_grad=True are in the optimizer
@@ -877,7 +914,7 @@ Step 8: Optimizer Update — Only Adapters Move
 
 ---
 
-Step 9: Repeat the Loop
+**Step 9: Repeat the Loop**
 
     for epoch in range(num_epochs):           # typically 1-5 epochs
     for batch in dataloader:
@@ -892,7 +929,7 @@ Step 9: Repeat the Loop
 
 ---
 
-Step 10: Save — Only the Adapter
+**Step 10: Save — Only the Adapter**
 
     After training, you save ONLY the LoRA matrices:
 
@@ -921,7 +958,7 @@ Step 10: Save — Only the Adapter
 
 ---
 
-Step 11: Deploy — Merge or Swap
+**Step 11: Deploy — Merge or Swap**
 
 You have two deployment options:
 
@@ -1030,6 +1067,18 @@ Prompt-based methods need their soft tokens prepended to every input forever.
 
 LoRA's mergeability is why it became the dominant PEFT method and why it's the default recommendation 
 for almost every fine-tuning scenario today.
+
+
+Merge and Disappear (At Inference)
+
+After training, you can compute:
+        
+    W_merged = W₀ + (α/r) · B × A
+    
+This produces a single weight matrix, identical in shape to the original W₀. 
+You discard A and B.
+The merged model has zero inference overhead — it's structurally identical to the base model, 
+just with slightly different weights. No PEFT library needed at inference.
 
 ---
 
@@ -1314,12 +1363,12 @@ comparison with full fine-tuning and other PEFT methods.
     │   │                   │                                  │  (32 layers) │  (rank=8)          │   │
     │   ├───────────────────┼──────────────────────────────────┼──────────────┼────────────────────┤   │
     │   │  Minimal          │  ["q_proj", "v_proj"]            │  64          │  ~4.2M  (0.06%)    │   │
-    │   │  Standard    ★    │  ["q_proj","k_proj","v_proj",    │  128         │  ~8.4M  (0.12%)    │   │
+    │   │  Standard    *    │  ["q_proj","k_proj","v_proj",    │  128         │  ~8.4M  (0.12%)    │   │
     │   │                   │   "o_proj"]                      │              │                    │   │
     │   │  Aggressive       │  "all-linear"  (attn + MLP)      │  224         │  ~18.9M (0.27%)    │   │
     │   └───────────────────┴──────────────────────────────────┴──────────────┴────────────────────┘   │
     │                                                                                                  │
-    │   ★ = most common starting point                                                                 │
+    │   * = most common starting point                                                                 │
     │                                                                                                  │
     └──────────────────────────────────────────────────────────────────────────────────────────────────┘
 
@@ -2227,9 +2276,13 @@ boost the blues slightly" — is simple enough to describe with just a few numbe
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                    LoRA VARIANTS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+{{LORA_IMAGE}}
+
+---
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                        LoRA VARIANTS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### DoRA (Weight-Decomposed Low-Rank Adaptation)
@@ -2317,326 +2370,13 @@ DoRA (Liu et al. 2024) decomposes weight updates into magnitude and direction co
 
 ---
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                 QLoRA — QUANTIZED LoRA
-                       (Making LoRA Work on Consumer GPUs)
-═══════════════════════════════════════════════════════════════════════════════════════════════
-
-
-### QLoRA — The Core Idea
-
-QLoRA (Quantized LoRA, Dettmers et al. 2023) combines two techniques:
-
-    1. Quantize the frozen base model to 4-bit precision (dramatically reduces memory)
-    2. Attach standard LoRA adapters in 16-bit precision (for training)
-
-This lets you fine-tune a 65B parameter model on a single 48GB GPU — something that would
-normally require a cluster of 8+ GPUs with full fine-tuning.
+##### Recap
 
 ---
-
-### What Is Quantization?
-
-Quantization reduces the precision of numbers to save memory:
-
-    ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │                         NUMBER PRECISION FORMATS                                 │
-    │                                                                                  │
-    │   Format        Bits    Bytes per param    7B model size    Range/Precision      │
-    │   ──────        ────    ───────────────    ─────────────    ────────────────     │
-    │   FP32          32      4 bytes            28.0 GB          Full precision       │
-    │   BF16/FP16     16      2 bytes            14.0 GB          Half precision       │
-    │   INT8           8      1 byte              7.0 GB          256 levels           │
-    │   NF4            4      0.5 bytes            3.5 GB         16 levels    ★       │
-    │   INT4           4      0.5 bytes            3.5 GB         16 levels            │
-    │                                                                                  │
-    │   ★ NF4 = Normal Float 4-bit, designed specifically for neural network weights   │
-    │     which follow a roughly normal (bell curve) distribution                      │
-    │                                                                                  │
-    └──────────────────────────────────────────────────────────────────────────────────┘
-
-
-**Naive 4-bit quantization destroys model quality.** The key insight of QLoRA is that
-the quantized model is ONLY used for the frozen forward pass. The LoRA adapters that
-actually get trained remain in full 16-bit precision. Quality loss from quantization
-is compensated by the adapters learning corrective adjustments.
-
----
-
-### QLoRA's Three Innovations
-
-**1. NF4 (4-bit NormalFloat):**
-
-    Standard 4-bit integers divide the number range uniformly:
-        INT4 levels: {-8, -7, -6, ..., 0, ..., 5, 6, 7}  (evenly spaced)
-
-    But neural network weights aren't uniformly distributed — they follow a bell curve
-    (normal distribution), clustered around zero.
-
-    NF4 places quantization levels according to the normal distribution:
-        More levels near zero (where most weights live) → finer precision where it matters
-        Fewer levels at extremes (where few weights live) → less precision where it doesn't
-
-    This gives NF4 ~0.5-1% better accuracy than naive INT4 for the same 4-bit budget.
-
-
-**2. Double Quantization:**
-
-    Quantization requires storing "quantization constants" — scaling factors for each
-    block of weights (typically one constant per 64 weights).
-
-    For a 7B model, these constants can consume ~500 MB.
-
-    Double quantization: quantize the quantization constants themselves (from FP32 to FP8).
-    Saves ~375 MB. Small on its own, but adds up for larger models.
-
-    ┌────────────────────────────────────────────────────────────────────────────────┐
-    │                                                                                │
-    │   WITHOUT double quantization:                                                 │
-    │       Weights: 4-bit      Constants: FP32 (~500 MB for 7B)                     │
-    │                                                                                │
-    │   WITH double quantization:                                                    │
-    │       Weights: 4-bit      Constants: FP8  (~125 MB for 7B)  ← saved 375 MB     │
-    │                                                                                │
-    └────────────────────────────────────────────────────────────────────────────────┘
-
-
-**3. Paged Optimizers:**
-
-    During training, GPU memory usage can spike temporarily (e.g., long sequences).
-    If these spikes exceed available VRAM, training crashes with OOM (out of memory).
-
-    Paged optimizers (from bitsandbytes) use CPU RAM as overflow:
-    when GPU VRAM is full, optimizer states are automatically paged to CPU RAM,
-    then paged back when needed — like virtual memory for GPU training.
-
-    This prevents OOM crashes at the cost of slightly slower training during spikes.
-
----
-
-### QLoRA Memory Breakdown
-
-    ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │                                                                                  │
-    │   QLoRA MEMORY BUDGET — 7B MODEL                                                 │
-    │                                                                                  │
-    │   Component                       Memory         Notes                           │
-    │   ─────────                       ──────         ─────                           │
-    │   Frozen base model (NF4)         ~3.5 GB        4-bit quantized                 │
-    │   Quantization constants          ~0.125 GB      Double-quantized (FP8)          │
-    │   LoRA adapters (BF16)            ~0.02 GB       Trainable A and B matrices      │
-    │   LoRA gradients                  ~0.02 GB       For adapter params only         │
-    │   LoRA optimizer states           ~0.08 GB       Adam states for adapters only   │
-    │   Activations + overhead          ~4-8 GB        Forward/backward pass cache     │
-    │   ──────────────────────────────────────────────────────────────────────         │
-    │   Total:                          ~8-12 GB       ★ Fits on a single 24GB GPU!    │
-    │                                                                                  │
-    │                                                                                  │
-    │   Compare:                                                                       │
-    │       Full FT (BF16 + Adam):      ~94-114 GB                                     │
-    │       Standard LoRA (BF16):       ~16-24  GB                                     │
-    │       QLoRA (NF4 + LoRA):         ~8-12   GB     ★                               │
-    │                                                                                  │
-    └──────────────────────────────────────────────────────────────────────────────────┘
-
-    For a 70B model with QLoRA: ~36-48 GB → fits on a single A100 80GB
-    (vs. ~1 TB+ for full fine-tuning)
-
----
-
-### QLoRA Data Flow — What Happens During Training
-
-    ┌──────────────────────────────────────────────────────────────────────────────────────┐
-    │                                                                                      │
-    │   QLoRA FORWARD + BACKWARD PASS                                                      │
-    │                                                                                      │
-    │   ┌───────────────┐       ┌────────────────────────────────────────────────┐         │
-    │   │               │       │              TRANSFORMER LAYER                 │         │
-    │   │  Input tokens │──────▶│                                                │         │
-    │   │  (BF16)       │       │   ┌────────────────────┐                       │         │
-    │   │               │       │   │  W₀ (frozen, NF4)  │                       │         │
-    │   └───────────────┘       │   │                    │                       │         │
-    │                           │   │  Dequantize on     │──── W₀x ────┐         │         │
-    │                           │   │  the fly: NF4→BF16 │             │         │         │
-    │                           │   │  (not stored,      │             ▼         │         │
-    │                           │   │   computed fresh   │         ┌────────┐    │         │
-    │                           │   │   each time)       │         │   +    │──▶ │ output  │
-    │                           │   └────────────────────┘         └────────┘    │         │
-    │                           │                                      ▲         │         │
-    │                           │   ┌──────────┐  ┌──────────┐        │          │         │
-    │                           │   │ A (BF16) │─▶│ B (BF16) │── BAx ─┘          │         │
-    │                           │   │ trainable│  │ trainable│   × (α/r)         │         │
-    │                           │   └──────────┘  └──────────┘                   │         │
-    │                           │                                                │         │
-    │                           └────────────────────────────────────────────────┘         │
-    │                                                                                      │
-    │   BACKWARD PASS:                                                                     │
-    │   • Gradients flow back through the LoRA path (A and B only)                         │
-    │   • Frozen NF4 weights: no gradients computed, no updates                            │
-    │   • Only A and B get updated by the optimizer                                        │
-    │   • Base weights are dequantized again during backprop (NF4 → BF16 on the fly)       │
-    │                                                                                      │
-    └──────────────────────────────────────────────────────────────────────────────────────┘
-
-
-    Key detail: the NF4 weights are NEVER stored in BF16. Every time the model needs them
-    (forward or backward), it dequantizes on the fly. This costs compute but saves memory.
-    The trade-off: QLoRA training is ~30-50% slower than standard LoRA, but uses ~50% less memory.
-
----
-
-### QLoRA vs LoRA — When to Use Which
-
-    ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │                                                                                  │
-    │   Scenario                                 Recommendation                        │
-    │   ────────                                 ──────────────                        │
-    │   Single 24GB GPU (RTX 3090/4090)          QLoRA  (only option that fits)        │
-    │   Single 48GB GPU (A6000)                  LoRA   (faster, no quant overhead)    │
-    │   Single 80GB GPU (A100/H100)              LoRA   (plenty of room)               │
-    │   70B model on one GPU                     QLoRA  (essential)                    │
-    │   Maximum training speed                   LoRA   (~30-50% faster than QLoRA)    │
-    │   Maximum quality at 7B scale              LoRA   (no quantization noise)        │
-    │   Tight budget, large model                QLoRA  (the whole point)              │
-    │                                                                                  │
-    │   Quality difference: typically <1% between LoRA and QLoRA on benchmarks.        │
-    │   For most practical purposes, QLoRA quality ≈ LoRA quality.                     │
-    │                                                                                  │
-    └──────────────────────────────────────────────────────────────────────────────────┘
-
-
-
----
-
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                    LoRA VARIANTS
-═══════════════════════════════════════════════════════════════════════════════════════════════
-
-
-### DoRA (Weight-Decomposed Low-Rank Adaptation)
-
-DoRA (Liu et al. 2024) decomposes weight updates into magnitude and direction components:
-
-    Standard LoRA:    W = W₀ + BA         (single combined update)
-    DoRA:             W = m · (W₀ + BA) / ||W₀ + BA||
-
-    Where m is a learnable magnitude vector and the rest captures direction.
-
-    Intuition: LoRA conflates "how much" and "which way" to adjust weights.
-    DoRA separates them — like adjusting both the brightness (magnitude) and
-    the hue (direction) of a color independently instead of changing both at once.
-
-    Result: DoRA consistently outperforms LoRA by 1-3% on benchmarks,
-    at the cost of slightly more parameters (~10% more) and training time.
-
-
-### LoRA+ (Different Learning Rates for A and B)
-
-    Standard LoRA: same learning rate for both A and B matrices.
-    LoRA+: uses different learning rates — typically B gets a higher LR than A.
-
-    Why? A (down-projection) maps to a compressed space.
-    B (up-projection) maps back to the original space.
-    They play different roles and benefit from different update magnitudes.
-
-    Typically: lr_B = 2× to 8× lr_A
-    Result: faster convergence, slightly better final performance.
-
-
-### rsLoRA (Rank-Stabilized LoRA)
-
-    Standard LoRA scaling:  (α/r) · BAx
-    rsLoRA scaling:         (α/√r) · BAx
-
-    Problem: as rank r increases, the standard α/r scaling shrinks the adapter
-    contribution, requiring retuning α. rsLoRA replaces r with √r so that
-    the scaling remains stable across different ranks.
-
-    Result: you can freely change rank without retuning α. Practical convenience.
-
-
-### AdaLoRA (Adaptive Low-Rank Adaptation)
-
-    Standard LoRA uses the same rank r for every target layer.
-    AdaLoRA dynamically allocates rank across layers based on importance.
-
-    Important layers (measured by sensitivity analysis) get higher rank.
-    Unimportant layers get lower rank or are pruned entirely.
-
-    Think of it as a budget allocation problem — given a fixed parameter budget,
-    spend more on the layers that matter most.
-
-    Uses SVD-based parameterization (W = P × Λ × Q) instead of the standard
-    A × B decomposition, which enables pruning by zeroing out singular values.
-
-
-### LoRA-FA (Frozen-A LoRA)
-
-    Freezes matrix A after initialization and only trains B.
-    Cuts trainable parameters roughly in half.
-
-    A is initialized with random Gaussian and stays fixed.
-    B learns to adapt the random projections from A to the task.
-
-    Surprisingly effective — the random projection in A provides sufficient
-    diversity, and B alone can learn task-specific adaptations.
-
-    ┌──────────────────────────────────────────────────────────────────────────────────┐
-    │                                                                                  │
-    │   LoRA VARIANTS COMPARISON                                                       │
-    │                                                                                  │
-    │   Method      Key Change                  Params vs LoRA    Quality vs LoRA      │
-    │   ──────      ──────────                  ──────────────    ───────────────      │
-    │   LoRA        Baseline                    1×                Baseline             │
-    │   DoRA        Magnitude + direction       ~1.1×             +1-3%                │
-    │   LoRA+       Different LR for A, B       1×                +0.5-2%              │
-    │   rsLoRA      √r scaling                  1×                Same (more stable)   │
-    │   AdaLoRA     Dynamic rank allocation     ≤1× (pruned)      +1-2%                │
-    │   LoRA-FA     Freeze A, train B only      ~0.5×             -0.5% to same        │
-    │                                                                                  │
-    └──────────────────────────────────────────────────────────────────────────────────┘
-
----
-
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                 BOTTLENECK ADAPTERS
-                           (The Original PEFT Method)
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                     BOTTLENECK ADAPTERS
+                               (The Original PEFT Method)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### Bottleneck Adapters — How They Work
@@ -2654,10 +2394,10 @@ feed-forward networks (bottleneck modules) between existing transformer layers.
     │   │ Self-Attention│               │ Self-Attention│ (frozen)                     │
     │   └──────┬────────┘               └───────┬───────┘                              │
     │          │                                │                                      │
-    │          │                         ┌──────┴───────┐                              │
-    │          │                         │ ██ ADAPTER ██│ ← NEW, trainable             │
-    │          │                         │ ██ down+up ██│                              │
-    │          │                         └──────┬───────┘                              │
+    │          │                         ┌──────┴────────┐                             │
+    │          │                         │ ██ ADAPTER ██ │  ← NEW, trainable           │
+    │          │                         │ ██ down+up ██ │                             │
+    │          │                         └──────┬────────┘                             │
     │          │                                │                                      │
     │   ┌──────┴────────┐                ┌──────┴───────┐                              │
     │   │   Add & Norm  │                │   Add & Norm │                              │
@@ -2667,10 +2407,10 @@ feed-forward networks (bottleneck modules) between existing transformer layers.
     │   │ Feed-Forward │                 │ Feed-Forward │ (frozen)                     │
     │   └──────┬───────┘                 └──────┬───────┘                              │
     │          │                                │                                      │
-    │          │                         ┌──────┴───────┐                              │
-    │          │                         │ ██ ADAPTER ██│ ← NEW, trainable             │
-    │          │                         │ ██ down+up ██│                              │
-    │          │                         └──────┬───────┘                              │
+    │          │                         ┌──────┴────────┐                             │
+    │          │                         │ ██ ADAPTER ██ │ ← NEW, trainable            │
+    │          │                         │ ██ down+up ██ │                             │
+    │          │                         └──────┬────────┘                             │
     │          │                                │                                      │
     │   ┌──────┴───────┐                 ┌──────┴───────┐                              │
     │   │   Add & Norm │                 │   Add & Norm │                              │
@@ -2716,10 +2456,10 @@ feed-forward networks (bottleneck modules) between existing transformer layers.
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                 (IA)³ — INFUSED ADAPTER BY INHIBITING
-                                       AND AMPLIFYING INNER ACTIVATIONS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                     (IA)³ — INFUSED ADAPTER BY INHIBITING
+                                           AND AMPLIFYING INNER ACTIVATIONS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 ### (IA)³ — Rescaling Vectors
 
@@ -2743,9 +2483,9 @@ that rescale the keys, values, and feed-forward activations:
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                SELECTIVE METHODS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                    SELECTIVE METHODS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### BitFit — Training Only Bias Terms
@@ -2780,9 +2520,9 @@ parameters, then creates a binary mask: 1 = train this parameter, 0 = freeze it.
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                PROMPT-BASED METHODS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                    PROMPT-BASED METHODS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 ### Prompt-Based Methods — No Weight Changes at All
 
@@ -2875,9 +2615,9 @@ learned prompts are added across all layers with layer-specific parameters.
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                HYBRID METHODS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                    HYBRID METHODS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### LongLoRA — Efficient Attention for Long Contexts
@@ -2909,10 +2649,10 @@ VeRA (Kopiczko et al. 2024) takes parameter efficiency even further:
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                         PEFT TRAINING — UNDER THE HOOD
-                    (The Data Pipeline with LoRA / QLoRA)
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                             PEFT TRAINING — UNDER THE HOOD
+                        (The Data Pipeline with LoRA / QLoRA)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### How PEFT Training Differs from Full Fine-Tuning
@@ -2992,20 +2732,20 @@ In PyTorch, every parameter has a `requires_grad` flag:
     │                                                                                  │
     │   Hyperparameter          Full Fine-Tuning         LoRA / QLoRA                  │
     │   ──────────────          ────────────────         ────────────                  │
-    │   Learning rate           1e-6 to 5e-5             1e-4 to 3e-4    ★ higher      │
+    │   Learning rate           1e-6 to 5e-5             1e-4 to 3e-4    * higher      │
     │   Epochs                  1-5                      1-5             (similar)     │
     │   Batch size              32-128                   16-64           (similar)     │
     │   Warmup                  5-10% of steps           3-10% of steps                │
-    │   Weight decay            0.01-0.1                 0.0-0.05       ★ lower        │
+    │   Weight decay            0.01-0.1                 0.0-0.05        * lower       │
     │   Scheduler               Cosine decay             Cosine decay    (similar)     │
     │   Gradient accumulation   Often needed             Often needed    (similar)     │
     │                                                                                  │
-    │   ★ LoRA can afford HIGHER learning rates because:                               │
+    │   * LoRA can afford HIGHER learning rates because:                               │
     │     1. Only updating ~0.1% of params → less risk of catastrophic change          │
     │     2. Low-rank adapters are less prone to overshooting                          │
     │     3. Base model is frozen → built-in regularization                            │
     │                                                                                  │
-    │   ★ LoRA needs LOWER weight decay because:                                       │
+    │   * LoRA needs LOWER weight decay because:                                       │
     │     1. Already heavily constrained by low-rank structure                         │
     │     2. Few parameters → less need for regularization                             │
     │                                                                                  │
@@ -3013,10 +2753,10 @@ In PyTorch, every parameter has a `requires_grad` flag:
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                               PRACTICAL PEFT WORKFLOW
-                          (End-to-End with HuggingFace PEFT)
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                   PRACTICAL PEFT WORKFLOW
+                              (End-to-End with HuggingFace PEFT)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### The Typical PEFT Pipeline
@@ -3069,9 +2809,9 @@ When you save a LoRA-trained model, you save ONLY the adapter:
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                         PEFT WITH ALIGNMENT — LoRA + DPO / RLHF
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                             PEFT WITH ALIGNMENT — LoRA + DPO / RLHF
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### Combining PEFT with Alignment Tuning
@@ -3098,9 +2838,9 @@ The most common production pipeline today uses PEFT at multiple stages:
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                         ADAPTER MERGING — COMBINING MULTIPLE ADAPTERS
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                             ADAPTER MERGING — COMBINING MULTIPLE ADAPTERS
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
 ### Merging Multiple LoRA Adapters
@@ -3153,9 +2893,90 @@ When you have trained separate adapters for different capabilities, you can comb
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                              WHEN TO USE WHICH PEFT METHOD
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                  WHEN LoRA DOESN'T WORK WELL
+                               (Failure Modes and Limitations)
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+
+LoRA is powerful, but it's not a universal solution. Understanding where it breaks down
+is just as important as knowing where it shines.
+
+**1. Tasks requiring vocabulary expansion**
+
+    LoRA cannot add new tokens to the vocabulary. If your target domain uses
+    specialized terminology that was not in the base model's training data
+    (rare chemical names, proprietary product codes, newly coined terms),
+    LoRA may tokenize them awkwardly and struggle to represent them well.
+
+    The LM head (the final projection from hidden states to vocab logits)
+    is typically frozen in LoRA. You can't give the model new output tokens.
+
+    Workaround: add new tokens and fine-tune the embedding + LM head layers
+    separately (selectively unfreeze those weights), or use full fine-tuning
+    for vocabulary-heavy domain adaptation.
+
+**2. Very large domain gaps**
+
+    LoRA's low-rank constraint works because task adaptation is assumed to be
+    low-dimensional. But if you are taking a general English model and trying
+    to make it fluent in a technical language with fundamentally different
+    syntax and semantics (e.g., translating between natural language and a
+    domain-specific programming language the base model has rarely seen),
+    the adaptation may not fit within the low-rank subspace.
+
+    Rule of thumb: the further your target domain is from pre-training,
+    the higher the rank you need — and eventually, full fine-tuning wins.
+
+**3. Small datasets with high rank**
+
+    Counterintuitively, using too high a rank with too little data causes
+    overfitting. The low-rank constraint is a form of regularization.
+    If you have only a few hundred examples and use rank=64, the adapter
+    has enough capacity to memorize the training set rather than generalize.
+
+    With small datasets, start with r=4 or r=8. Let the rank constraint
+    do the regularization work for you.
+
+**4. Tasks where non-linearity matters**
+
+    LoRA is purely linear: ΔW = B × A. No activation function between A and B.
+    Bottleneck Adapters include a ReLU or GELU between the down- and up-projections,
+    which can capture non-linear task-specific transformations.
+
+    For most instruction-tuning tasks this doesn't matter — the non-linearity
+    in the frozen transformer itself is sufficient. But for tasks requiring
+    a very different "shape" of computation, adapters may outperform LoRA.
+
+**5. Continual learning across many tasks**
+
+    If you need to sequentially fine-tune a single adapter across many tasks
+    without merging, earlier tasks will be overwritten (catastrophic forgetting
+    within the adapter). LoRA prevents forgetting of the base model, but the
+    adapter itself has no such protection.
+
+    Mitigation: train separate adapters per task and swap at inference time,
+    rather than training one adapter incrementally.
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                  │
+    │   WHEN TO USE FULL FINE-TUNING INSTEAD                                           │
+    │                                                                                  │
+    │   Signal                                        Recommendation                   │
+    │   ──────                                        ──────────────                   │
+    │   Need new vocabulary / tokens                  Full FT or selective unfreeze    │
+    │   Domain gap is extremely large                 Full FT with high LR warmup      │
+    │   Dataset < 500 examples                        LoRA r=4, or prompt tuning       │
+    │   Dataset > 1M examples, unlimited compute      Full FT (max quality)            │
+    │   Multiple sequential tasks, one adapter        Separate adapters per task       │
+    │   LoRA at r=64 still underperforms              Full FT                          │
+    │                                                                                  │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+---
+
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                  WHEN TO USE WHICH PEFT METHOD
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
     ┌───────────────────────────────────────────────────────────────────────────────────────────┐
@@ -3191,9 +3012,9 @@ When you have trained separate adapters for different capabilities, you can comb
 
 ---
 
-═══════════════════════════════════════════════════════════════════════════════════════════════
-                                    SUMMARY MENTAL MODEL
-═══════════════════════════════════════════════════════════════════════════════════════════════
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
+                                        SUMMARY MENTAL MODEL
+    ═══════════════════════════════════════════════════════════════════════════════════════════════
 
 
     FULL FINE-TUNING                              PEFT (LoRA / QLoRA)
@@ -3225,8 +3046,8 @@ When you have trained separate adapters for different capabilities, you can comb
     │                                                                                                           │
     │   Method              Category            Params Trained    Memory    Quality       Best For              │
     │   ──────              ────────            ──────────────    ──────    ───────       ────────              │
-    │   LoRA                Reparameterization   0.1-1%           Low       Very Good     General purpose   ★   │
-    │   QLoRA               Hybrid               0.1-1%           V. Low    Very Good     Large models      ★   │
+    │   LoRA                Reparameterization   0.1-1%           Low       Very Good     General purpose   *   │
+    │   QLoRA               Hybrid               0.1-1%           V. Low    Very Good     Large models      *   │
     │   DoRA                Reparameterization   0.1-1.1%         Low       Excellent     When +1-3% matters    │
     │   AdaLoRA             Reparameterization   ≤0.1-1%          Low       Very Good     Optimal rank alloc    │
     │   LoRA+               Reparameterization   0.1-1%           Low       Very Good     Faster convergence    │
@@ -3237,11 +3058,26 @@ When you have trained separate adapters for different capabilities, you can comb
     │   Prompt Tuning       Prompt-based         ~0.001%          Lowest    Moderate      Large models, few-shot│
     │   VeRA                Reparameterization   ~0.01%           V. Low    Good          Extreme efficiency    │
     │                                                                                                           │
-    │   ★ = Recommended starting point for most practitioners                                                   │
+    │   * = Recommended starting point for most practitioners                                                   │
     │                                                                                                           │
     └───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
 ---
+
+Why It Works — The Intuition
+
+Think of a pre-trained model as having already organized the world's knowledge into a high-dimensional structure. 
+When you fine-tune for a specific task, you're not restructuring the whole thing — you're just rotating a small subspace
+of that structure to be more relevant to your domain. That rotation can be described with a low-rank matrix. 
+LoRA is essentially finding that rotation directly, without wasting parameters on the parts of the weight space that 
+don't need to change.
+
+The Inference Advantage Over Adapters:
+
+Bottleneck Adapters (the main Additive PEFT alternative) insert new modules between layers. 
+Those modules are there at inference time, adding extra computation on every forward pass. 
+LoRA's adapters merge back into the original weights and vanish. Net inference overhead: zero. 
+This is the main practical reason LoRA dominates despite the similar parameter counts.
 
 """
 
@@ -3450,8 +3286,25 @@ for name, param in model.named_parameters():
 
 def get_content():
     """Return all content for this topic module."""
+    from Required_Images.lora_visual import LORA_VISUAL_HEIGHT, LORA_VISUAL_HTML
+
+
+    # Interactive component data — app.py splits theory_raw at each
+    # placeholder and injects an st.components.v1.html() iframe instead.
+    interactive_components = [
+
+        {
+            "placeholder": "{{LORA_IMAGE}}",
+            "html": LORA_VISUAL_HTML,
+            "height": LORA_VISUAL_HEIGHT,
+        },
+
+    ]
     return {
         "theory": THEORY,
+        "theory_raw": THEORY,
+        "interactive_components": interactive_components,
         "complexity": COMPLEXITY,
         "operations": OPERATIONS,
+        "render_operations": None, # render_operations,
     }

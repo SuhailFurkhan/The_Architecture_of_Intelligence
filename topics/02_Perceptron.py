@@ -621,7 +621,7 @@ Understanding the single perceptron means understanding the atom from which all 
 # ─────────────────────────────────────────────────────────────────────────────
 
 COMPLEXITY = """
-
+None
 """
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -632,6 +632,7 @@ OPERATIONS = {
     "Perceptron Implementation": {
         "description": "Single Percepton Implementation",
         "runnable": True,
+        "pipeline_cmd": "token",
         "code": '''
 """
 ================================================================================

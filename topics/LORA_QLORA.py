@@ -2,6 +2,227 @@
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+═══════════════════════════════════════════════════════════════════════════════════════════════
+                                 QLoRA — QUANTIZED LoRA
+                       (Making LoRA Work on Consumer GPUs)
+═══════════════════════════════════════════════════════════════════════════════════════════════
+
+
+### QLoRA — The Core Idea
+
+QLoRA (Quantized LoRA, Dettmers et al. 2023) combines two techniques:
+
+    1. Quantize the frozen base model to 4-bit precision (dramatically reduces memory)
+    2. Attach standard LoRA adapters in 16-bit precision (for training)
+
+This lets you fine-tune a 65B parameter model on a single 48GB GPU — something that would
+normally require a cluster of 8+ GPUs with full fine-tuning.
+
+---
+
+### What Is Quantization?
+
+Quantization reduces the precision of numbers to save memory:
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                         NUMBER PRECISION FORMATS                                 │
+    │                                                                                  │
+    │   Format        Bits    Bytes per param    7B model size    Range/Precision      │
+    │   ──────        ────    ───────────────    ─────────────    ────────────────     │
+    │   FP32          32      4 bytes            28.0 GB          Full precision       │
+    │   BF16/FP16     16      2 bytes            14.0 GB          Half precision       │
+    │   INT8           8      1 byte              7.0 GB          256 levels           │
+    │   NF4            4      0.5 bytes            3.5 GB         16 levels    ★       │
+    │   INT4           4      0.5 bytes            3.5 GB         16 levels            │
+    │                                                                                  │
+    │   ★ NF4 = Normal Float 4-bit, designed specifically for neural network weights   │
+    │     which follow a roughly normal (bell curve) distribution                      │
+    │                                                                                  │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+**Naive 4-bit quantization destroys model quality.** The key insight of QLoRA is that
+the quantized model is ONLY used for the frozen forward pass. The LoRA adapters that
+actually get trained remain in full 16-bit precision. Quality loss from quantization
+is compensated by the adapters learning corrective adjustments.
+
+---
+
+### QLoRA's Three Innovations
+
+**1. NF4 (4-bit NormalFloat):**
+
+    Standard 4-bit integers divide the number range uniformly:
+        INT4 levels: {-8, -7, -6, ..., 0, ..., 5, 6, 7}  (evenly spaced)
+
+    But neural network weights aren't uniformly distributed — they follow a bell curve
+    (normal distribution), clustered around zero.
+
+    NF4 places quantization levels according to the normal distribution:
+        More levels near zero (where most weights live) → finer precision where it matters
+        Fewer levels at extremes (where few weights live) → less precision where it doesn't
+
+    This gives NF4 ~0.5-1% better accuracy than naive INT4 for the same 4-bit budget.
+
+
+**2. Double Quantization:**
+
+    Quantization requires storing "quantization constants" — scaling factors for each
+    block of weights (typically one constant per 64 weights).
+
+    For a 7B model, these constants can consume ~500 MB.
+
+    Double quantization: quantize the quantization constants themselves (from FP32 to FP8).
+    Saves ~375 MB. Small on its own, but adds up for larger models.
+
+    ┌────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                │
+    │   WITHOUT double quantization:                                                 │
+    │       Weights: 4-bit      Constants: FP32 (~500 MB for 7B)                     │
+    │                                                                                │
+    │   WITH double quantization:                                                    │
+    │       Weights: 4-bit      Constants: FP8  (~125 MB for 7B)  ← saved 375 MB     │
+    │                                                                                │
+    └────────────────────────────────────────────────────────────────────────────────┘
+
+
+**3. Paged Optimizers:**
+
+    During training, GPU memory usage can spike temporarily (e.g., long sequences).
+    If these spikes exceed available VRAM, training crashes with OOM (out of memory).
+
+    Paged optimizers (from bitsandbytes) use CPU RAM as overflow:
+    when GPU VRAM is full, optimizer states are automatically paged to CPU RAM,
+    then paged back when needed — like virtual memory for GPU training.
+
+    This prevents OOM crashes at the cost of slightly slower training during spikes.
+
+---
+
+### QLoRA Memory Breakdown
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                  │
+    │   QLoRA MEMORY BUDGET — 7B MODEL                                                 │
+    │                                                                                  │
+    │   Component                       Memory         Notes                           │
+    │   ─────────                       ──────         ─────                           │
+    │   Frozen base model (NF4)         ~3.5 GB        4-bit quantized                 │
+    │   Quantization constants          ~0.125 GB      Double-quantized (FP8)          │
+    │   LoRA adapters (BF16)            ~0.02 GB       Trainable A and B matrices      │
+    │   LoRA gradients                  ~0.02 GB       For adapter params only         │
+    │   LoRA optimizer states           ~0.08 GB       Adam states for adapters only   │
+    │   Activations + overhead          ~4-8 GB        Forward/backward pass cache     │
+    │   ──────────────────────────────────────────────────────────────────────         │
+    │   Total:                          ~8-12 GB       ★ Fits on a single 24GB GPU!    │
+    │                                                                                  │
+    │                                                                                  │
+    │   Compare:                                                                       │
+    │       Full FT (BF16 + Adam):      ~94-114 GB                                     │
+    │       Standard LoRA (BF16):       ~16-24  GB                                     │
+    │       QLoRA (NF4 + LoRA):         ~8-12   GB     ★                               │
+    │                                                                                  │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+    For a 70B model with QLoRA: ~36-48 GB → fits on a single A100 80GB
+    (vs. ~1 TB+ for full fine-tuning)
+
+---
+
+### QLoRA Data Flow — What Happens During Training
+
+    ┌──────────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                      │
+    │   QLoRA FORWARD + BACKWARD PASS                                                      │
+    │                                                                                      │
+    │   ┌───────────────┐       ┌────────────────────────────────────────────────┐         │
+    │   │               │       │              TRANSFORMER LAYER                 │         │
+    │   │  Input tokens │──────▶│                                                │         │
+    │   │  (BF16)       │       │   ┌────────────────────┐                       │         │
+    │   │               │       │   │  W₀ (frozen, NF4)  │                       │         │
+    │   └───────────────┘       │   │                    │                       │         │
+    │                           │   │  Dequantize on     │──── W₀x ────┐         │         │
+    │                           │   │  the fly: NF4→BF16 │             │         │         │
+    │                           │   │  (not stored,      │             ▼         │         │
+    │                           │   │   computed fresh   │         ┌────────┐    │         │
+    │                           │   │   each time)       │         │   +    │──▶ │ output  │
+    │                           │   └────────────────────┘         └────────┘    │         │
+    │                           │                                      ▲         │         │
+    │                           │   ┌──────────┐  ┌──────────┐        │          │         │
+    │                           │   │ A (BF16) │─▶│ B (BF16) │── BAx ─┘          │         │
+    │                           │   │ trainable│  │ trainable│   × (α/r)         │         │
+    │                           │   └──────────┘  └──────────┘                   │         │
+    │                           │                                                │         │
+    │                           └────────────────────────────────────────────────┘         │
+    │                                                                                      │
+    │   BACKWARD PASS:                                                                     │
+    │   • Gradients flow back through the LoRA path (A and B only)                         │
+    │   • Frozen NF4 weights: no gradients computed, no updates                            │
+    │   • Only A and B get updated by the optimizer                                        │
+    │   • Base weights are dequantized again during backprop (NF4 → BF16 on the fly)       │
+    │                                                                                      │
+    └──────────────────────────────────────────────────────────────────────────────────────┘
+
+
+    Key detail: the NF4 weights are NEVER stored in BF16. Every time the model needs them
+    (forward or backward), it dequantizes on the fly. This costs compute but saves memory.
+    The trade-off: QLoRA training is ~30-50% slower than standard LoRA, but uses ~50% less memory.
+
+---
+
+### QLoRA vs LoRA — When to Use Which
+
+    ┌──────────────────────────────────────────────────────────────────────────────────┐
+    │                                                                                  │
+    │   Scenario                                 Recommendation                        │
+    │   ────────                                 ──────────────                        │
+    │   Single 24GB GPU (RTX 3090/4090)          QLoRA  (only option that fits)        │
+    │   Single 48GB GPU (A6000)                  LoRA   (faster, no quant overhead)    │
+    │   Single 80GB GPU (A100/H100)              LoRA   (plenty of room)               │
+    │   70B model on one GPU                     QLoRA  (essential)                    │
+    │   Maximum training speed                   LoRA   (~30-50% faster than QLoRA)    │
+    │   Maximum quality at 7B scale              LoRA   (no quantization noise)        │
+    │   Tight budget, large model                QLoRA  (the whole point)              │
+    │                                                                                  │
+    │   Quality difference: typically <1% between LoRA and QLoRA on benchmarks.        │
+    │   For most practical purposes, QLoRA quality ≈ LoRA quality.                     │
+    │                                                                                  │
+    └──────────────────────────────────────────────────────────────────────────────────┘
+
+
+
+
 ═══════════════════════════════════════════════════════════════════════════════════════════════
                                     LoRA — LOW-RANK ADAPTATION
                              (The Most Important PEFT Method to Understand)
