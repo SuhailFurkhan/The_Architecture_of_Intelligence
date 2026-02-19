@@ -690,6 +690,11 @@ with st.sidebar.expander("ℹ️ How to Add Content"):
     4. Restart the app — auto-discovered!
     """)
 
+# ADD THESE 4 LINES:
+st.sidebar.markdown("---")
+if st.sidebar.button("⏹️ Stop Server", type="secondary", use_container_width=True):
+    import signal
+    os.kill(os.getpid(), signal.SIGTERM)
 
 # =============================================================================
 # MAIN CONTENT
@@ -809,9 +814,7 @@ if st.session_state.main_view == "topics":
                                     if op_name in filtered_operations:
                                         op_data = filtered_operations[op_name]
                                         with st.expander(f"▶️ {op_name}", expanded=auto_expand):
-                                            st.markdown(f"**Description:** {op_data['description']}")
-                                            st.markdown("---")
-                                            st.code(op_data["code"], language="python")
+                                            render_operation(op_name, op_data, key_prefix="sec")
 
                                 st.markdown("")
 
@@ -825,15 +828,11 @@ if st.session_state.main_view == "topics":
                             st.markdown("### 📂 Other")
                             for op_name, op_data in uncategorized.items():
                                 with st.expander(f"▶️ {op_name}", expanded=auto_expand):
-                                    st.markdown(f"**Description:** {op_data['description']}")
-                                    st.markdown("---")
-                                    st.code(op_data["code"], language="python")
+                                    render_operation(op_name, op_data, key_prefix="uncat")
                     else:
                         for operation_name, operation_data in filtered_operations.items():
                             with st.expander(f"▶️ {operation_name}", expanded=auto_expand):
-                                st.markdown(f"**Description:** {operation_data['description']}")
-                                st.markdown("---")
-                                st.code(operation_data["code"], language="python")
+                                render_operation(operation_name, operation_data, key_prefix="flat")
                 else:
                     st.info(f"No operations found matching '{search_term}'")
 

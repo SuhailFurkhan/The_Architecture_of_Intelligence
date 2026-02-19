@@ -631,6 +631,7 @@ OPERATIONS = {
     "Multi-Layer Perceptron (MLP) ": {
         "description": "Multi Percepton Implementation",
         "runnable": True,
+        "pipeline_cmd": "token",
         "code":
 
 r'''
