@@ -68,3 +68,46 @@ Copy `Automation_Infrastructure/_tutorial_template.py`, rename without the under
 
 ## AI Assistant
 Supports Anthropic Claude, OpenAI GPT, and Mock mode. Add your API key to `Keys.env`.
+
+Create a `Keys.env` file in the project root. The app will auto-detect whichever keys are present and pick the best available provider (Anthropic preferred over OpenAI).
+
+```env
+# ─────────────────────────────────────────────────────────────────────────────
+# Keys.env  —  API Keys for AI Concepts Reference Hub
+# ─────────────────────────────────────────────────────────────────────────────
+# Rules:
+#   • NO spaces around the = sign
+#   • NO quotes around the value
+#   • NO trailing spaces after the value
+#   • Lines starting with # are comments and are ignored
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Anthropic Claude  (preferred LLM provider)
+# Get your key at: https://console.anthropic.com
+# Format: starts with "sk-ant-api03-", exactly 108 characters
+ANTHROPIC_API_KEY=sk-ant-xxxxx-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# OpenAI GPT  (fallback LLM provider)
+# Get your key at: https://platform.openai.com/api-keys
+# Format: starts with "sk-"
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# HuggingFace  (required for fine-tuning pipeline steps)
+# Get your token at: https://huggingface.co/settings/tokens
+# Format: starts with "hf_"
+HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+### Which keys do you need?
+
+| Key                 | Required for                     | Where to get it                                                          |
+|---------------------|----------------------------------|--------------------------------------------------------------------------|
+| `ANTHROPIC_API_KEY` | AI Help chat (preferred)         | [console.anthropic.com](https://console.anthropic.com)                   |
+| `OPENAI_API_KEY`    | AI Help chat (fallback)          | [platform.openai.com/api-keys](https://platform.openai.com/api-keys)     |
+| `HF_TOKEN`          | Fine-tuning topic pipeline steps | [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens) |
+
+You only need **one** of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` for the AI assistant. 
+If both are present the app automatically uses Anthropic. `HF_TOKEN` is only needed if you want to run the Full Fine-Tuning, PEFT Additive, or LoRA pipeline steps.
+
+> ⚠️ `Keys.env` is listed in `.gitignore` — it will never be committed to version control.
+
+
