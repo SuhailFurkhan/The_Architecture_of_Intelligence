@@ -8,7 +8,23 @@ and the practical trade-offs that make PEFT the dominant fine-tuning
 paradigm for modern LLMs.
 """
 
+import os
+import re
+import sys
+import subprocess
+from pathlib import Path
+
 TOPIC_NAME = "PEFT_Additive_IA3_Breakdown"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATH TO THE PIPELINE SCRIPT
+# topics/08_b_FT_PEFT_Additive_Breakdown.py
+# Implementation/PEFT_Additive/scripts/additive_main.py
+# ─────────────────────────────────────────────────────────────────────────────
+_THIS_DIR    = Path(__file__).resolve().parent
+_PROJECT_ROOT = _THIS_DIR.parent
+_SCRIPTS_DIR  = _PROJECT_ROOT / "Implementation" / "PEFT_Additive" / "scripts"
+_MAIN_SCRIPT  = _SCRIPTS_DIR / "additive_main.py"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # THEORY
@@ -2297,11 +2313,152 @@ COMPLEXITY = """
 # ─────────────────────────────────────────────────────────────────────────────
 # OPERATIONS — Key code snippets for quick reference
 # ─────────────────────────────────────────────────────────────────────────────
+
 OPERATIONS = {
 
 # ─────────────────────────────────────────────────────────────────────────────
-# NEW OPERATIONS — Paste these into the OPERATIONS dict in
-# 08_b_FT_PEFT_Additive_Breakdown.py
+# PIPELINE OPERATIONS — Runnable steps that execute the real PEFT Additive
+# training pipeline via additive_main.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+    "1. Check VRAM Requirements": {
+        "description": "Estimates GPU memory needed for Additive PEFT training — much lighter than full fine-tuning",
+        "runnable": True,
+        "pipeline_cmd": "vram",
+        "code": '''# VRAM Estimation for Additive PEFT
+# ===================================
+# Frozen base model (BF16, no gradients):  P × 2 bytes
+# Adapter weights (BF16):                  A × 2 bytes  (tiny — ~64 MB for b=64)
+# Adapter gradients (BF16):               A × 2 bytes
+# Adapter optimizer (AdamW FP32):          A × 8 bytes
+# Activations (adapter adds a little):    ~1-4 GB
+#
+# Example: LLaMA-3.2-1B + Bottleneck b=64
+#   Frozen weights:  1.24B × 2 = 2.5  GB
+#   Adapter:         8.5M  × 2 = 17   MB  (b=64 across 32 layers)
+#   Grads + optim:   8.5M  × 10 = 85  MB
+#   Activations:              ~1.5 GB
+#   TOTAL:                    ~5-6 GB  (vs ~16 GB for full FT)
+#
+# CLI equivalent:
+#   python additive_main.py --run vram --yes
+''',
+    },
+
+    "2. Prepare Dataset": {
+        "description": "Downloads the dataset from HuggingFace, applies chat template formatting, and tokenizes",
+        "runnable": True,
+        "pipeline_cmd": "prepare",
+        "code": '''# Data Preparation Pipeline (additive_prepare_data.py):
+# =======================================================
+# 1. Authenticate with HuggingFace using your token
+# 2. Download dataset (default: yahma/alpaca-cleaned, ~52K examples)
+# 3. Apply Llama chat template to each example:
+#       {"instruction": "...", "input": "...", "output": "..."}
+# 4. Tokenize all examples using the model's tokenizer
+# 5. Create train/eval split
+# 6. Return tokenized datasets ready for the Trainer
+#
+# Same data prep as full fine-tuning — the adapter sits on top of
+# the same base model, so the tokenization format is identical.
+#
+# CLI equivalent:
+#   python additive_main.py --run prepare --yes
+''',
+    },
+
+    "3. Train Adapter": {
+        "description": "TAKES TIME — Freezes base model, inserts adapter modules, trains only the new parameters",
+        "runnable": True,
+        "pipeline_cmd": "train",
+        "needs_confirmation": True,
+        "code": '''# Adapter Training Loop (additive_train.py + additive_train_0.py):
+# ==================================================================
+# Phase 1 — Feature Extraction (additive_train_0.py):
+#   - Freeze ALL base model parameters (requires_grad = False)
+#   - Insert BottleneckAdapter / (IA)³ modules into every layer
+#   - Only newly inserted adapter weights get gradients
+#   - Much less VRAM: no base model gradients or optimizer states
+#
+# Phase 2 — Full Adapter Run (additive_train.py):
+#   - Same frozen base + adapters setup
+#   - AdamW optimizer, Cosine LR scheduler, BF16 mixed precision
+#   - Gradient checkpointing optional (less critical than full FT)
+#   - Only adapter weights updated each step
+#   - Saves adapter checkpoint (NOT full model — just adapter weights)
+#
+# ESTIMATED TIME (much faster than full FT):
+#   RTX 3090:  ~30-60 min
+#   RTX 4090:  ~20-40 min
+#   A100:      ~10-20 min
+#
+# CLI equivalent:
+#   python additive_main.py --run train --yes
+''',
+    },
+
+    "4. Test Inference": {
+        "description": "Load the trained adapter on top of the base model and generate text to verify it works",
+        "runnable": True,
+        "pipeline_cmd": "inference",
+        "code": '''# Inference Testing (additive_inference.py):
+# ============================================
+# 1. Load the FROZEN base model
+# 2. Load the saved adapter weights from outputs/final/
+# 3. Attach adapter to base model (PeftModel.from_pretrained)
+# 4. Send a test prompt through the model
+# 5. Display the generated response
+#
+# NOTE: Bottleneck adapters remain in the architecture at inference.
+# The adapter modules add a small amount of latency on every forward pass.
+# (IA)³ adapters can be merged to eliminate this overhead.
+#
+# CLI equivalent:
+#   python additive_main.py --run inference --yes --prompt "..."
+''',
+    },
+
+    "5. Compare Original vs Fine-Tuned": {
+        "description": "Side-by-side comparison of the base model vs your adapter-enhanced version",
+        "runnable": True,
+        "pipeline_cmd": "compare",
+        "code": '''# Model Comparison (additive_compare.py):
+# =========================================
+# 1. Load the ORIGINAL base model (no adapters)
+# 2. Load base model + adapter weights
+# 3. Send identical prompts to both
+# 4. Display side-by-side responses
+#
+# Because the base model is shared, both can often fit in VRAM
+# simultaneously — the adapter adds almost no memory overhead.
+#
+# CLI equivalent:
+#   python additive_main.py --run compare --yes
+''',
+    },
+
+    "6. Run Full Pipeline (1 to 5)": {
+        "description": "Runs ALL steps sequentially — VRAM, Data, Train, Inference, Compare",
+        "runnable": True,
+        "pipeline_cmd": "all",
+        "needs_confirmation": True,
+        "code": '''# Full Additive PEFT Pipeline (all steps in sequence):
+# ======================================================
+# Step 1: Check VRAM requirements
+# Step 2: Prepare dataset (download + tokenize)
+# Step 3: Train adapter (frozen base + new adapter modules)
+# Step 4: Quick inference test
+# Step 5: Compare base model vs adapter model
+#
+# Each step must succeed before the next one starts.
+#
+# CLI equivalent:
+#   python additive_main.py --run all --yes
+''',
+    },
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EDUCATIONAL CODE SNIPPETS — Reference implementations below
 # ─────────────────────────────────────────────────────────────────────────────
 
     # ── BOTTLENECK ADAPTERS ────────────────────────────────────────────────────
@@ -2824,6 +2981,314 @@ for name, params in configs.items():
 
 }
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTOM STREAMLIT RENDERER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_operations():
+    """
+    Custom Streamlit UI for the Operations tab.
+
+    Called by app_Testing.py instead of the default code-in-expander rendering.
+    Provides:
+    - Configuration panel (adapter type, bottleneck dim, model, etc.)
+    - Run buttons for each pipeline step
+    - Real-time streaming output from subprocess
+    - Step status tracking (pending / running / success / failed)
+    """
+    import streamlit as st
+
+    # ── Session State Init ──
+    if "additive_step_outputs" not in st.session_state:
+        st.session_state.additive_step_outputs = {}
+    if "additive_step_status" not in st.session_state:
+        st.session_state.additive_step_status = {}
+
+    # ── Verify Script Exists ──
+    script_path = _MAIN_SCRIPT
+    scripts_dir = _SCRIPTS_DIR
+
+    if not script_path.exists():
+        st.error(
+            f"**Pipeline script not found!**\n\n"
+            f"Expected at:\n`{script_path}`\n\n"
+            f"Edit the path variables `_SCRIPTS_DIR` / `_MAIN_SCRIPT` at the "
+            f"top of `08_b_FT_PEFT_Additive_Breakdown.py` to match your layout."
+        )
+        st.markdown("---")
+        st.caption("Falling back to code-only view:")
+        _render_code_only(st)
+        return
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CONFIGURATION PANEL
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("⚙️ Adapter Configuration — Edit before running", expanded=False):
+        st.caption("These values will be used when running the pipeline steps.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            model_name = st.selectbox(
+                "Base Model",
+                options=[
+                    "unsloth/Llama-3.2-1B-Instruct",
+                    "meta-llama/Llama-3.2-1B-Instruct",
+                    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                    "HuggingFaceTB/SmolLM2-360M-Instruct",
+                    "openai-community/gpt2",
+                ],
+                index=0,
+                key="additive_model_name",
+            )
+            adapter_type = st.selectbox(
+                "Adapter Type",
+                options=["bottleneck", "ia3"],
+                index=0,
+                key="additive_adapter_type",
+            )
+            bottleneck_dim = st.select_slider(
+                "Bottleneck Dimension (b)",
+                options=[8, 16, 32, 64, 128, 256],
+                value=64,
+                key="additive_bottleneck_dim",
+            )
+            max_seq_length = st.select_slider(
+                "Max Sequence Length",
+                options=[128, 256, 512, 1024, 2048],
+                value=512,
+                key="additive_seq_len",
+            )
+
+        with col2:
+            num_epochs = st.number_input(
+                "Epochs", min_value=1, max_value=10, value=3,
+                key="additive_epochs",
+            )
+            learning_rate = st.select_slider(
+                "Learning Rate",
+                options=[1e-5, 5e-5, 1e-4, 2e-4, 5e-4, 1e-3],
+                value=1e-4,
+                format_func=lambda x: f"{x:.0e}",
+                key="additive_lr",
+            )
+            batch_size = st.number_input(
+                "Per-Device Batch Size",
+                min_value=1, max_value=16, value=2,
+                key="additive_batch_size",
+            )
+            grad_accum = st.number_input(
+                "Gradient Accumulation Steps",
+                min_value=1, max_value=64, value=8,
+                key="additive_grad_accum",
+            )
+
+        effective_bs = batch_size * grad_accum
+        adapter_note = (
+            "BottleneckAdapter — non-linear, serial, permanent latency"
+            if adapter_type == "bottleneck"
+            else "(IA)³ — linear rescaling, mergeable, near-zero latency"
+        )
+        st.info(
+            f"**Adapter:** {adapter_note}  \n"
+            f"**Effective batch size:** {batch_size} × {grad_accum} = **{effective_bs}**"
+        )
+
+    st.markdown("---")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PIPELINE STEPS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    st.markdown("### Pipeline Steps")
+    st.caption("Click **Run** to execute. Output streams in real-time.")
+    st.markdown("")
+
+    # Only iterate over pipeline operations (those with pipeline_cmd)
+    pipeline_ops = {k: v for k, v in OPERATIONS.items() if v.get("pipeline_cmd")}
+
+    for op_name, op_data in pipeline_ops.items():
+        pipeline_cmd = op_data.get("pipeline_cmd", "")
+        needs_confirm = op_data.get("needs_confirmation", False)
+        step_key = pipeline_cmd
+
+        # ── Status Icon ──
+        status = st.session_state.additive_step_status.get(step_key, "pending")
+        icon = {"pending": "⬜", "running": "🔄", "success": "✅", "failed": "❌"}.get(status, "⬜")
+
+        has_output = step_key in st.session_state.additive_step_outputs
+        with st.expander(f"{icon} {op_name}", expanded=has_output):
+
+            st.markdown(f"**{op_data['description']}**")
+
+            if st.checkbox("Show code details", key=f"additive_showcode_{step_key}", value=False):
+                st.code(op_data["code"], language="python")
+
+            st.markdown("---")
+
+            # ── Confirmation for slow steps ──
+            run_disabled = False
+            if needs_confirm:
+                confirmed = st.checkbox(
+                    "⚠️ I understand this will take time and I'm ready to proceed",
+                    key=f"additive_confirm_{step_key}",
+                    value=False,
+                )
+                run_disabled = not confirmed
+
+            # ── Custom prompt for inference ──
+            custom_prompt = None
+            if step_key == "inference":
+                custom_prompt = st.text_input(
+                    "Test prompt:",
+                    value="What is transfer learning? Explain in 2 sentences.",
+                    key="additive_inference_prompt",
+                )
+
+            # ── Buttons ──
+            col_run, col_clear = st.columns([3, 1])
+
+            with col_run:
+                if st.button(
+                    "▶️ Run",
+                    key=f"additive_run_{step_key}",
+                    disabled=run_disabled,
+                    use_container_width=True,
+                    type="primary" if step_key in ("train", "train0", "all") else "secondary",
+                ):
+                    _run_pipeline_step(
+                        st, step_key, op_name,
+                        script_path, scripts_dir,
+                        prompt=custom_prompt,
+                    )
+
+            with col_clear:
+                if has_output:
+                    if st.button(
+                        "Clear", key=f"additive_clear_{step_key}", use_container_width=True
+                    ):
+                        del st.session_state.additive_step_outputs[step_key]
+                        st.session_state.additive_step_status[step_key] = "pending"
+                        st.rerun()
+
+            # ── Live Output ──
+            if has_output:
+                output = st.session_state.additive_step_outputs[step_key]
+                if status == "success":
+                    st.success("Completed successfully")
+                elif status == "failed":
+                    st.error("Step failed — see output below")
+                st.code(output, language="text")
+
+    st.markdown("---")
+    st.markdown("### Educational Code Snippets")
+    st.caption("Reference implementations — view the code, or run self-contained demos.")
+
+    # Render remaining (non-pipeline) operations in the default style
+    educational_ops = {k: v for k, v in OPERATIONS.items() if not v.get("pipeline_cmd")}
+    for op_name, op_data in educational_ops.items():
+        is_runnable = op_data.get("runnable", False)
+        with st.expander(f"{'▶️' if is_runnable else '📖'} {op_name}", expanded=False):
+            st.markdown(f"**Description:** {op_data['description']}")
+            st.markdown("---")
+            st.code(op_data["code"], language="python")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUBPROCESS RUNNER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_pipeline_step(st, step_key, step_label, script_path, scripts_dir, prompt=None):
+    """Run a pipeline step via subprocess, streaming stdout to Streamlit."""
+    st.session_state.additive_step_status[step_key] = "running"
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--run", step_key,
+        "--yes",
+    ]
+
+    if step_key == "inference" and prompt:
+        cmd.extend(["--prompt", prompt])
+
+    output_lines = []
+    output_placeholder = st.empty()
+
+    try:
+        output_placeholder.info(f"🔄 Starting: {step_label} ...")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=str(scripts_dir),
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        for line in process.stdout:
+            clean = _strip_ansi(line)
+            output_lines.append(clean)
+            output_placeholder.code("".join(output_lines), language="text")
+
+        process.wait()
+
+        if process.returncode == 0:
+            st.session_state.additive_step_status[step_key] = "success"
+            output_lines.append(
+                f"\n{'='*50}\n"
+                f"  {step_label} — completed successfully.\n"
+            )
+        else:
+            st.session_state.additive_step_status[step_key] = "failed"
+            output_lines.append(
+                f"\n{'='*50}\n"
+                f"  {step_label} — failed (exit code {process.returncode}).\n"
+            )
+
+    except FileNotFoundError:
+        st.session_state.additive_step_status[step_key] = "failed"
+        output_lines.append(
+            f"Could not find Python or script.\n"
+            f"  Python: {sys.executable}\n"
+            f"  Script: {script_path}\n"
+        )
+    except Exception as e:
+        st.session_state.additive_step_status[step_key] = "failed"
+        output_lines.append(f"Unexpected error: {e}\n")
+
+    final_output = "".join(output_lines)
+    st.session_state.additive_step_outputs[step_key] = final_output
+    output_placeholder.code(final_output, language="text")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FALLBACK — Code-only view if script path is wrong
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_code_only(st):
+    """Render operations as plain code expanders (no run buttons)."""
+    for op_name, op_data in OPERATIONS.items():
+        with st.expander(f"▶️ {op_name}", expanded=False):
+            st.markdown(f"**Description:** {op_data['description']}")
+            st.markdown("---")
+            st.code(op_data["code"], language="python")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _strip_ansi(text):
+    """Remove ANSI color/formatting escape codes from terminal output."""
+    return re.compile(r'\x1b\[[0-9;]*m').sub('', text)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTENT EXPORT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2864,5 +3329,5 @@ def get_content():
         "interactive_components": interactive_components,
         "complexity": COMPLEXITY,
         "operations": OPERATIONS,
-        "render_operations": None, # render_operations,
+        "render_operations": render_operations,
     }

@@ -33,14 +33,13 @@ from pathlib import Path
 # ──────────────────────────────────────────────────────────────────────────────
 # Model dimension registry
 # ──────────────────────────────────────────────────────────────────────────────
-MODEL_DIMS = \
-    {
+MODEL_DIMS = {
     "unsloth/Llama-3.2-1B-Instruct":      {"d": 2048, "kv_d": 256,  "ffn": 8192,  "layers": 16, "total": 1_240_000_000},
     "meta-llama/Llama-3.2-1B-Instruct":   {"d": 2048, "kv_d": 256,  "ffn": 8192,  "layers": 16, "total": 1_240_000_000},
     "unsloth/Llama-3.2-3B-Instruct":      {"d": 3072, "kv_d": 1024, "ffn": 8192,  "layers": 28, "total": 3_210_000_000},
     "unsloth/Meta-Llama-3.1-8B-Instruct": {"d": 4096, "kv_d": 1024, "ffn": 14336, "layers": 32, "total": 8_030_000_000},
     "HuggingFaceTB/SmolLM2-360M-Instruct":{"d": 960,  "kv_d": 320,  "ffn": 2560,  "layers": 32, "total": 360_000_000},
-    }
+}
 
 
 def calculate_bottleneck_params(dims: dict, bottleneck_dim: int,
@@ -153,6 +152,10 @@ def estimate_vram(config: dict, trainable_params: int, dims: dict) -> dict:
 
 
 def main():
+    # config_path = Path(__file__).parent / "additive_training_config.yaml"
+    # with open(config_path) as f:
+    #     config = yaml.safe_load(f)
+
     config_path = Path(__file__).parent.parent / "configs" / "additive_training_config.yaml"
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)

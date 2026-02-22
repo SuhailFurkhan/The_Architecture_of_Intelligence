@@ -1,26 +1,26 @@
 """
 additive_compare.py — Analyze what Bottleneck Adapters and (IA)³ learned.
 
-╔══════════════════════════════════════════════════════════════════════════╗
+╔═════════════════════════════════════════════════════════════════════════╗
 ║  WHAT TO ANALYZE — HOW THIS DIFFERS FROM LoRA COMPARE                   ║
-║                                                                          ║
-║  LoRA analysis:                                                          ║
+║                                                                         ║
+║  LoRA analysis:                                                         ║
 ║    • Weight drift in existing matrices (W_q, W_k, etc.)                 ║
 ║    • Adapter matrix norms: ‖B·A‖ per layer                              ║
 ║    • Which layers adapted most vs least                                 ║
-║                                                                          ║
-║  Bottleneck Adapter analysis:                                            ║
-║    • Adapter weight magnitudes: ‖W_down‖, ‖W_up‖ per layer             ║
+║                                                                         ║
+║  Bottleneck Adapter analysis:                                           ║
+║    • Adapter weight magnitudes: ‖W_down‖, ‖W_up‖ per layer              ║
 ║    • Base model weight drift: SHOULD BE ZERO (they're frozen)           ║
 ║    • Effective output magnitude: ‖W_up · GELU(W_down)‖                  ║
 ║    • Input/output similarity: how much does adapter change h?           ║
-║                                                                          ║
-║  (IA)³ analysis:                                                         ║
+║                                                                         ║
+║  (IA)³ analysis:                                                        ║
 ║    • l vector values: which dimensions are amplified vs suppressed?     ║
 ║    • Distance from ones: ‖l - 1‖ measures total deviation from identity ║
 ║    • Top amplified/suppressed feature dimensions per layer              ║
 ║    • Base model weight drift: SHOULD BE ZERO (they're frozen)           ║
-╚══════════════════════════════════════════════════════════════════════════╝
+╚═════════════════════════════════════════════════════════════════════════╝
 
 Usage:
     python additive_compare.py

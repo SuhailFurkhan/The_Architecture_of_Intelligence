@@ -8,7 +8,25 @@ and the practical trade-offs that make PEFT the dominant fine-tuning
 paradigm for modern LLMs.
 """
 
+
+import os
+import re
+import sys
+import subprocess
+from pathlib import Path
+
 TOPIC_NAME = "Fine_Tuning_PEFT_LORA"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PATH TO THE PIPELINE SCRIPT
+# topics/08_c_PEFT_Reparameterization_LORA.py
+# Implementation/PEFT_LORA/peft_main.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+_THIS_DIR     = Path(__file__).resolve().parent
+_PROJECT_ROOT = _THIS_DIR.parent
+_SCRIPTS_DIR  = _PROJECT_ROOT / "Implementation" / "PEFT_LORA"
+_MAIN_SCRIPT  = _SCRIPTS_DIR / "peft_main.py"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # THEORY
@@ -3106,6 +3124,157 @@ COMPLEXITY = """
 # ─────────────────────────────────────────────────────────────────────────────
 
 OPERATIONS = {
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PIPELINE OPERATIONS — Runnable steps that execute the real LoRA training
+# pipeline via peft_main.py  (valid --run choices: vram, prepare, train,
+# inference, compare, all)
+# ─────────────────────────────────────────────────────────────────────────────
+
+    "1. Check VRAM Requirements": {
+        "description": "Estimates GPU memory needed for LoRA training based on your config — much lighter than full fine-tuning",
+        "runnable": True,
+        "pipeline_cmd": "vram",
+        "code": '''# VRAM Estimation for LoRA
+# =========================
+# Frozen base model (BF16, no gradients):  P × 2 bytes
+# LoRA adapter weights (BF16):             A × 2 bytes  (tiny — r=8 ≈ 32 MB)
+# LoRA gradients (BF16):                   A × 2 bytes
+# LoRA optimizer states (AdamW FP32):      A × 8 bytes
+# Activations (with grad checkpointing):   ~1-4 GB
+#
+# Example: LLaMA-3.2-1B + LoRA r=8, alpha=16
+#   Frozen weights:  1.24B × 2 = 2.5   GB
+#   LoRA weights:    4.2M  × 2 = 8.4   MB
+#   Grads + optim:   4.2M  × 10 = 42   MB
+#   Activations:               ~1.5 GB
+#   TOTAL:                     ~5 GB   (vs ~16 GB for full FT)
+#
+# CLI equivalent:
+#   python peft_main.py --run vram --yes
+''',
+    },
+
+    "2. Prepare Dataset": {
+        "description": "Downloads dataset from HuggingFace, applies the model chat template, and tokenizes for LoRA training",
+        "runnable": True,
+        "pipeline_cmd": "prepare",
+        "code": '''# Data Preparation Pipeline (peft_prepare_data.py):
+# ===================================================
+# 1. Authenticate with HuggingFace using your token
+# 2. Download dataset (default: yahma/alpaca-cleaned, ~52K examples)
+# 3. Apply Llama chat template to each example:
+#       {"instruction": "...", "input": "...", "output": "..."}
+# 4. Tokenize all examples using the model's tokenizer
+# 5. Create train/eval split
+# 6. Return tokenized datasets ready for the Trainer
+#
+# Identical pipeline to full fine-tuning — LoRA sits transparently on
+# top of the frozen base model, so tokenization is unchanged.
+#
+# CLI equivalent:
+#   python peft_main.py --run prepare --yes
+''',
+    },
+
+    "3. Train LoRA Adapters": {
+        "description": "TAKES TIME — Freezes base model, attaches LoRA adapters, trains only A and B matrices",
+        "runnable": True,
+        "pipeline_cmd": "train",
+        "needs_confirmation": True,
+        "code": '''# LoRA Training Loop (peft_train.py):
+# =====================================
+# 1. Load base model in BF16 with device_map="auto"
+# 2. Apply LoRA via get_peft_model(model, lora_config):
+#       - Injects A [r × d_in] and B [d_out × r] matrices into target modules
+#       - B initialized to zero → adapter outputs 0 at step 0 (identity start)
+#       - A initialized with Gaussian noise
+#       - ALL base model params set requires_grad = False
+# 3. Configure TrainingArguments:
+#       - AdamW (fused), Cosine LR scheduler, BF16 mixed precision
+#       - Gradient checkpointing to save VRAM
+# 4. Run trainer.train()
+#       - Only LoRA A and B matrices get gradients + optimizer states
+#       - Effective weight update: W_effective = W_frozen + (alpha/r) * B * A
+# 5. Save adapter checkpoint (NOT the full model):
+#       adapter_model.safetensors  (~32 MB for r=8 on 1B model)
+#       adapter_config.json        (~1 KB)
+#
+# ESTIMATED TIME:
+#   RTX 3090:  ~30-60 min
+#   RTX 4090:  ~20-40 min
+#   A100:      ~10-20 min
+#
+# CLI equivalent:
+#   python peft_main.py --run train --yes
+''',
+    },
+
+    "4. Test Inference": {
+        "description": "Load the trained LoRA adapter on top of the base model and generate text to verify it works",
+        "runnable": True,
+        "pipeline_cmd": "inference",
+        "code": '''# Inference Testing (peft_inference.py):
+# ========================================
+# 1. Load the FROZEN base model
+# 2. Load saved LoRA adapter weights from outputs/final/
+# 3. Attach adapter via PeftModel.from_pretrained(base, adapter_path)
+# 4. Send a test prompt through the model
+# 5. Display the generated response
+#
+# At inference the effective weight is:
+#   W_effective = W_frozen + (alpha/r) × B × A
+# This is computed on-the-fly. To eliminate this overhead entirely,
+# use merge_and_unload() to bake A×B into W_frozen permanently.
+#
+# CLI equivalent:
+#   python peft_main.py --run inference --yes --prompt "..."
+''',
+    },
+
+    "5. Compare Original vs Fine-Tuned": {
+        "description": "Side-by-side comparison of the frozen base model vs your LoRA-adapted version",
+        "runnable": True,
+        "pipeline_cmd": "compare",
+        "code": '''# Model Comparison (peft_compare.py):
+# =====================================
+# 1. Load the ORIGINAL base model (no adapters)
+# 2. Load base model + LoRA adapter weights
+# 3. Send identical prompts to both
+# 4. Display side-by-side responses
+#
+# The base model is shared between both runs — LoRA adds only ~32 MB
+# on top, so both typically fit in VRAM simultaneously.
+#
+# CLI equivalent:
+#   python peft_main.py --run compare --yes
+''',
+    },
+
+    "6. Run Full Pipeline (1 to 5)": {
+        "description": "Runs ALL steps sequentially — VRAM, Data, Train, Inference, Compare",
+        "runnable": True,
+        "pipeline_cmd": "all",
+        "needs_confirmation": True,
+        "code": '''# Full LoRA Pipeline (all steps in sequence):
+# =============================================
+# Step 1: Check VRAM requirements
+# Step 2: Prepare dataset (download + tokenize)
+# Step 3: Train LoRA adapters (frozen base + A/B matrices)
+# Step 4: Quick inference test
+# Step 5: Compare base model vs LoRA model
+#
+# Each step must succeed before the next one starts.
+#
+# CLI equivalent:
+#   python peft_main.py --run all --yes
+''',
+    },
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EDUCATIONAL CODE SNIPPETS — Reference implementations below
+# ─────────────────────────────────────────────────────────────────────────────
+
     "LoRA Config Setup (HuggingFace PEFT)": {
         "description": "Standard LoRA configuration using the PEFT library",
         "runnable": False,
@@ -3280,6 +3449,309 @@ for name, param in model.named_parameters():
 }
 
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CUSTOM STREAMLIT RENDERER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def render_operations():
+    """
+    Custom Streamlit UI for the Operations tab.
+
+    Called by app_Testing.py instead of the default code-in-expander rendering.
+    Provides:
+    - Configuration panel (rank, alpha, target modules, model, etc.)
+    - Run buttons for each pipeline step
+    - Real-time streaming output from subprocess
+    - Step status tracking (pending / running / success / failed)
+    """
+    import streamlit as st
+
+    # ── Session State Init ──
+    if "lora_step_outputs" not in st.session_state:
+        st.session_state.lora_step_outputs = {}
+    if "lora_step_status" not in st.session_state:
+        st.session_state.lora_step_status = {}
+
+    # ── Verify Script Exists ──
+    script_path = _MAIN_SCRIPT
+    scripts_dir = _SCRIPTS_DIR
+
+    if not script_path.exists():
+        st.error(
+            f"**Pipeline script not found!**\n\n"
+            f"Expected at:\n`{script_path}`\n\n"
+            f"Edit the path variables `_SCRIPTS_DIR` / `_MAIN_SCRIPT` at the "
+            f"top of `08_c_PEFT_Reparameterization_LORA.py` to match your layout."
+        )
+        st.markdown("---")
+        st.caption("Falling back to code-only view:")
+        _render_code_only(st)
+        return
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # CONFIGURATION PANEL
+    # ═══════════════════════════════════════════════════════════════════════
+    with st.expander("⚙️ LoRA Configuration — Edit before running", expanded=False):
+        st.caption("These values will be used when running the pipeline steps.")
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            model_name = st.selectbox(
+                "Base Model",
+                options=[
+                    "unsloth/Llama-3.2-1B-Instruct",
+                    "meta-llama/Llama-3.2-1B-Instruct",
+                    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+                    "HuggingFaceTB/SmolLM2-360M-Instruct",
+                    "openai-community/gpt2",
+                ],
+                index=0,
+                key="lora_model_name",
+            )
+            lora_rank = st.select_slider(
+                "LoRA Rank (r)",
+                options=[1, 2, 4, 8, 16, 32, 64],
+                value=8,
+                key="lora_rank",
+            )
+            lora_alpha = st.select_slider(
+                "LoRA Alpha (α)",
+                options=[4, 8, 16, 32, 64, 128],
+                value=16,
+                key="lora_alpha",
+            )
+            target_modules = st.multiselect(
+                "Target Modules",
+                options=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+                default=["q_proj", "k_proj", "v_proj", "o_proj"],
+                key="lora_target_modules",
+            )
+
+        with col2:
+            max_seq_length = st.select_slider(
+                "Max Sequence Length",
+                options=[128, 256, 512, 1024, 2048],
+                value=512,
+                key="lora_seq_len",
+            )
+            num_epochs = st.number_input(
+                "Epochs", min_value=1, max_value=10, value=3,
+                key="lora_epochs",
+            )
+            learning_rate = st.select_slider(
+                "Learning Rate",
+                options=[1e-5, 5e-5, 1e-4, 2e-4, 3e-4, 5e-4],
+                value=2e-4,
+                format_func=lambda x: f"{x:.0e}",
+                key="lora_lr",
+            )
+            batch_size = st.number_input(
+                "Per-Device Batch Size",
+                min_value=1, max_value=16, value=2,
+                key="lora_batch_size",
+            )
+            grad_accum = st.number_input(
+                "Gradient Accumulation Steps",
+                min_value=1, max_value=64, value=8,
+                key="lora_grad_accum",
+            )
+
+        effective_bs = batch_size * grad_accum
+        scaling = lora_alpha / lora_rank
+        st.info(
+            f"**LoRA scaling (α/r):** {lora_alpha}/{lora_rank} = **{scaling:.2f}**  \n"
+            f"**Effective batch size:** {batch_size} × {grad_accum} = **{effective_bs}**"
+        )
+
+    st.markdown("---")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # PIPELINE STEPS
+    # ═══════════════════════════════════════════════════════════════════════
+
+    st.markdown("### Pipeline Steps")
+    st.caption("Click **Run** to execute. Output streams in real-time.")
+    st.markdown("")
+
+    pipeline_ops = {k: v for k, v in OPERATIONS.items() if v.get("pipeline_cmd")}
+
+    for op_name, op_data in pipeline_ops.items():
+        pipeline_cmd  = op_data.get("pipeline_cmd", "")
+        needs_confirm = op_data.get("needs_confirmation", False)
+        step_key      = pipeline_cmd
+
+        status = st.session_state.lora_step_status.get(step_key, "pending")
+        icon   = {"pending": "⬜", "running": "🔄", "success": "✅", "failed": "❌"}.get(status, "⬜")
+
+        has_output = step_key in st.session_state.lora_step_outputs
+        with st.expander(f"{icon} {op_name}", expanded=has_output):
+
+            st.markdown(f"**{op_data['description']}**")
+
+            if st.checkbox("Show code details", key=f"lora_showcode_{step_key}", value=False):
+                st.code(op_data["code"], language="python")
+
+            st.markdown("---")
+
+            run_disabled = False
+            if needs_confirm:
+                confirmed = st.checkbox(
+                    "⚠️ I understand this will take time and I'm ready to proceed",
+                    key=f"lora_confirm_{step_key}",
+                    value=False,
+                )
+                run_disabled = not confirmed
+
+            custom_prompt = None
+            if step_key == "inference":
+                custom_prompt = st.text_input(
+                    "Test prompt:",
+                    value="Explain the difference between supervised and unsupervised learning.",
+                    key="lora_inference_prompt",
+                )
+
+            col_run, col_clear = st.columns([3, 1])
+
+            with col_run:
+                if st.button(
+                    "▶️ Run",
+                    key=f"lora_run_{step_key}",
+                    disabled=run_disabled,
+                    use_container_width=True,
+                    type="primary" if step_key in ("train", "all") else "secondary",
+                ):
+                    _run_pipeline_step(
+                        st, step_key, op_name,
+                        script_path, scripts_dir,
+                        prompt=custom_prompt,
+                    )
+
+            with col_clear:
+                if has_output:
+                    if st.button(
+                        "Clear", key=f"lora_clear_{step_key}", use_container_width=True
+                    ):
+                        del st.session_state.lora_step_outputs[step_key]
+                        st.session_state.lora_step_status[step_key] = "pending"
+                        st.rerun()
+
+            if has_output:
+                output = st.session_state.lora_step_outputs[step_key]
+                if status == "success":
+                    st.success("Completed successfully")
+                elif status == "failed":
+                    st.error("Step failed — see output below")
+                st.code(output, language="text")
+
+    st.markdown("---")
+    st.markdown("### Educational Code Snippets")
+    st.caption("Reference implementations — read the theory in action.")
+
+    educational_ops = {k: v for k, v in OPERATIONS.items() if not v.get("pipeline_cmd")}
+    for op_name, op_data in educational_ops.items():
+        is_runnable = op_data.get("runnable", False)
+        with st.expander(f"{'▶️' if is_runnable else '📖'} {op_name}", expanded=False):
+            st.markdown(f"**Description:** {op_data['description']}")
+            st.markdown("---")
+            st.code(op_data["code"], language="python")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SUBPROCESS RUNNER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _run_pipeline_step(st, step_key, step_label, script_path, scripts_dir, prompt=None):
+    """Run a pipeline step via subprocess, streaming stdout to Streamlit."""
+    st.session_state.lora_step_status[step_key] = "running"
+
+    cmd = [
+        sys.executable,
+        str(script_path),
+        "--run", step_key,
+        "--yes",
+    ]
+
+    if step_key == "inference" and prompt:
+        cmd.extend(["--prompt", prompt])
+
+    output_lines     = []
+    output_placeholder = st.empty()
+
+    try:
+        output_placeholder.info(f"🔄 Starting: {step_label} ...")
+
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            cwd=str(scripts_dir),
+            env={**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"},
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        for line in process.stdout:
+            clean = _strip_ansi(line)
+            output_lines.append(clean)
+            output_placeholder.code("".join(output_lines), language="text")
+
+        process.wait()
+
+        if process.returncode == 0:
+            st.session_state.lora_step_status[step_key] = "success"
+            output_lines.append(
+                f"\n{'='*50}\n"
+                f"  {step_label} — completed successfully.\n"
+            )
+        else:
+            st.session_state.lora_step_status[step_key] = "failed"
+            output_lines.append(
+                f"\n{'='*50}\n"
+                f"  {step_label} — failed (exit code {process.returncode}).\n"
+            )
+
+    except FileNotFoundError:
+        st.session_state.lora_step_status[step_key] = "failed"
+        output_lines.append(
+            f"Could not find Python or script.\n"
+            f"  Python: {sys.executable}\n"
+            f"  Script: {script_path}\n"
+        )
+    except Exception as e:
+        st.session_state.lora_step_status[step_key] = "failed"
+        output_lines.append(f"Unexpected error: {e}\n")
+
+    final_output = "".join(output_lines)
+    st.session_state.lora_step_outputs[step_key] = final_output
+    output_placeholder.code(final_output, language="text")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FALLBACK — Code-only view if script path is wrong
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _render_code_only(st):
+    """Render operations as plain code expanders (no run buttons)."""
+    for op_name, op_data in OPERATIONS.items():
+        with st.expander(f"▶️ {op_name}", expanded=False):
+            st.markdown(f"**Description:** {op_data['description']}")
+            st.markdown("---")
+            st.code(op_data["code"], language="python")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _strip_ansi(text):
+    """Remove ANSI color/formatting escape codes from terminal output."""
+    return re.compile(r'\x1b\[[0-9;]*m').sub('', text)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CONTENT EXPORT
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3306,5 +3778,5 @@ def get_content():
         "interactive_components": interactive_components,
         "complexity": COMPLEXITY,
         "operations": OPERATIONS,
-        "render_operations": None, # render_operations,
+        "render_operations": render_operations,
     }

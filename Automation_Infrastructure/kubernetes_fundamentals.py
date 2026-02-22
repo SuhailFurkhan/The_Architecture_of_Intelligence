@@ -46,42 +46,42 @@ as building/running a single container; Kubernetes manages fleets of them.
 | **ConfigMap**     | Store non-sensitive config as key-value pairs.                        |
 | **Secret**        | Store sensitive data (passwords, tokens) — base64 encoded.            |
 | **Ingress**       | Manages external HTTP/HTTPS access to Services.                       |
-| **PV / PVC**      | PersistentVolume / Claim — storage that outlives Pods.               |
-| **kubectl**       | The CLI tool to interact with K8s clusters.                          |
+| **PV / PVC**      | PersistentVolume / Claim — storage that outlives Pods.                |
+| **kubectl**       | The CLI tool to interact with K8s clusters.                           | 
 
 ### Architecture Overview
 
 ```
     ┌─────────────────── Kubernetes Cluster ───────────────────┐
     │                                                          │
-    │   ┌─────────── Control Plane ──────────┐                │
+    │   ┌─────────── Control Plane ───────────┐                │
     │   │                                     │                │
-    │   │  ┌──────────┐   ┌──────────────┐   │                │
-    │   │  │ API Server│   │  Scheduler    │   │                │
-    │   │  └─────┬────┘   └──────────────┘   │                │
+    │   │  ┌───────────┐   ┌───────────────┐  │                │
+    │   │  │ API Server│   │  Scheduler    │  │                │
+    │   │  └─────┬─────┘   └───────────────┘  │                │
     │   │        │                            │                │
-    │   │  ┌─────┴──────┐  ┌──────────────┐  │                │
-    │   │  │ Controller  │  │    etcd       │  │                │
-    │   │  │  Manager    │  │ (state store) │  │                │
-    │   │  └────────────┘  └──────────────┘  │                │
+    │   │  ┌─────┴───────┐  ┌───────────────┐ │                │
+    │   │  │ Controller  │  │    etcd       │ │                │
+    │   │  │  Manager    │  │ (state store) │ │                │
+    │   │  └─────────────┘  └───────────────┘ │                │
     │   └─────────────────────────────────────┘                │
     │                    │                                     │
-    │         ┌──────────┼──────────┐                         │
-    │         ▼          ▼          ▼                         │
-    │   ┌──────────┐ ┌──────────┐ ┌──────────┐              │
-    │   │  Node 1   │ │  Node 2   │ │  Node 3   │             │
-    │   │           │ │           │ │           │             │
-    │   │ ┌───────┐ │ │ ┌───────┐ │ │ ┌───────┐ │             │
-    │   │ │ Pod A  │ │ │ │ Pod B  │ │ │ │ Pod C  │ │            │
-    │   │ │ Pod D  │ │ │ │ Pod E  │ │ │ │ Pod F  │ │            │
-    │   │ └───────┘ │ │ └───────┘ │ │ └───────┘ │             │
-    │   │           │ │           │ │           │             │
-    │   │ ┌───────┐ │ │ ┌───────┐ │ │ ┌───────┐ │             │
-    │   │ │kubelet │ │ │ │kubelet │ │ │ │kubelet │ │            │
-    │   │ │kube-   │ │ │ │kube-   │ │ │ │kube-   │ │            │
-    │   │ │proxy   │ │ │ │proxy   │ │ │ │proxy   │ │            │
-    │   │ └───────┘ │ │ └───────┘ │ │ └───────┘ │             │
-    │   └──────────┘ └──────────┘ └──────────┘              │
+    │         ┌──────────┼──────────┐                          │
+    │         ▼          ▼          ▼                          │
+    │   ┌───────────┐ ┌───────────┐ ┌───────────┐              │
+    │   │  Node 1   │ │  Node 2   │ │  Node 3   │              │
+    │   │           │ │           │ │           │              │
+    │   │ ┌───────┐ │ │ ┌───────┐ │ │ ┌───────┐ │              │
+    │   │ │ Pod A │ │ │ │ Pod B │ │ │ │ Pod C │ │              │
+    │   │ │ Pod D │ │ │ │ Pod E │ │ │ │ Pod F │ │              │
+    │   │ └───────┘ │ │ └───────┘ │ │ └───────┘ │              │
+    │   │           │ │           │ │           │              │
+    │   │ ┌───────┐ │ │ ┌───────┐ │ │ ┌───────┐ │              │
+    │   │ │kubelet│ │ │ │kubelet│ │ │ │kubelet│ │              │
+    │   │ │kube-  │ │ │ │kube-  │ │ │ │kube-  │ │              │
+    │   │ │proxy  │ │ │ │proxy  │ │ │ │proxy  │ │              │
+    │   │ └───────┘ │ │ └───────┘ │ │ └───────┘ │              │
+    │   └───────────┘ └───────────┘ └───────────┘              │
     │                                                          │
     └──────────────────────────────────────────────────────────┘
 
@@ -138,18 +138,18 @@ COMMANDS = """
 | `kubectl get services`                      | List Services                             |
 | `kubectl get all`                           | List all major resources                  |
 | `kubectl get nodes`                         | List cluster nodes                        |
-| `kubectl apply -f file.yaml`               | Create/update resources from YAML         |
-| `kubectl delete -f file.yaml`              | Delete resources defined in YAML          |
-| `kubectl describe pod <name>`              | Detailed info about a Pod                 |
+| `kubectl apply -f file.yaml`                | Create/update resources from YAML         |
+| `kubectl delete -f file.yaml`               | Delete resources defined in YAML          |
+| `kubectl describe pod <name>`               | Detailed info about a Pod                 |
 | `kubectl logs <pod>`                        | View Pod logs                             |
 | `kubectl logs -f <pod>`                     | Follow Pod logs (live)                    |
-| `kubectl exec -it <pod> -- bash`           | Shell into a Pod                          |
-| `kubectl port-forward <pod> 8080:80`       | Forward local port to Pod                 |
-| `kubectl scale deploy <name> --replicas=5` | Scale replicas up/down                    |
-| `kubectl rollout status deploy/<name>`     | Watch a rolling update                    |
-| `kubectl rollout undo deploy/<name>`       | Rollback to previous version              |
-| `kubectl config get-contexts`              | List available cluster contexts           |
-| `kubectl config use-context <ctx>`         | Switch to a different cluster             |
+| `kubectl exec -it <pod> -- bash`            | Shell into a Pod                          |
+| `kubectl port-forward <pod> 8080:80`        | Forward local port to Pod                 |
+| `kubectl scale deploy <name> --replicas=5`  | Scale replicas up/down                    |
+| `kubectl rollout status deploy/<name>`      | Watch a rolling update                    |
+| `kubectl rollout undo deploy/<name>`        | Rollback to previous version              |
+| `kubectl config get-contexts`               | List available cluster contexts           |
+| `kubectl config use-context <ctx>`          | Switch to a different cluster             |
 
 ### Useful Shortcuts & Flags
 
@@ -161,7 +161,7 @@ COMMANDS = """
 | `-n <namespace>`                 | Target a specific namespace                  |
 | `--watch` / `-w`                 | Watch for changes in real-time               |
 | `-l app=myapp`                   | Filter by label                              |
-| `--dry-run=client -o yaml`      | Generate YAML without applying               |
+| `--dry-run=client -o yaml`       | Generate YAML without applying               |
 | `kubectl explain pod.spec`       | Docs for any field in a resource spec        |
 """
 

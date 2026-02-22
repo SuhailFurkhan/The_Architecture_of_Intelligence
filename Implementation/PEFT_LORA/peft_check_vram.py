@@ -180,7 +180,7 @@ def main():
     if not config_path.exists():
         config_path = Path(__file__).parent.parent / "configs" / "peft_training_config.yaml"
 
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     model_name = config.get("model_name", "unsloth/Llama-3.2-1B-Instruct")
