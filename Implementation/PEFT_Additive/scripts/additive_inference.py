@@ -5,25 +5,25 @@ additive_inference.py — Inference for Bottleneck Adapters and (IA)³.
 ║  INFERENCE: HOW ADDITIVE METHODS DIFFER FROM LoRA                        ║
 ║                                                                          ║
 ║  LoRA (merged):                                                          ║
-║    Load model → looks like a normal model → zero overhead               ║
+║    Load model → looks like a normal model → zero overhead                ║
 ║                                                                          ║
 ║  LoRA (unmerged):                                                        ║
-║    Load base + PeftModel.from_pretrained → parallel bypass active       ║
-║    → can swap adapters, slight extra compute                            ║
+║    Load base + PeftModel.from_pretrained → parallel bypass active        ║
+║    → can swap adapters, slight extra compute                             ║
 ║                                                                          ║
 ║  Bottleneck Adapters:                                                    ║
-║    ALWAYS need PeftModel.from_pretrained (cannot merge non-linear)      ║
-║    Every inference call routes tokens through:                          ║
-║      frozen_layer → adapter (down → GELU → up → residual) → ...        ║
-║    ~5–15% slower than base model (depends on bottleneck_dim)            ║
+║    ALWAYS need PeftModel.from_pretrained (cannot merge non-linear)       ║
+║    Every inference call routes tokens through:                           ║
+║      frozen_layer → adapter (down → GELU → up → residual) → ...          ║
+║    ~5–15% slower than base model (depends on bottleneck_dim)             ║
 ║                                                                          ║
 ║  (IA)³ (unmerged):                                                       ║
-║    Load base + PeftModel.from_pretrained → l vectors applied to K/V/FF  ║
-║    Overhead: element-wise multiply → nearly zero                        ║
+║    Load base + PeftModel.from_pretrained → l vectors applied to K/V/FF   ║
+║    Overhead: element-wise multiply → nearly zero                         ║
 ║                                                                          ║
 ║  (IA)³ (merged):                                                         ║
-║    If trained with merge_before_save=true (or merged manually),         ║
-║    loads as a standard model → exactly zero overhead                    ║
+║    If trained with merge_before_save=true (or merged manually),          ║
+║    loads as a standard model → exactly zero overhead                     ║
 ╚══════════════════════════════════════════════════════════════════════════╝
 
 Usage:

@@ -475,7 +475,7 @@ precious and there's typically 32-64 GB of CPU RAM available as a buffer.
     │   │ Available:             0.4 GB   │           └───────────────────────────────┘    │
     │   └─────────────────────────────────┘                                                │
     │                                                                                      │
-    │   Spike handled: no OOM. After spike, optimizer states page back to GPU.            │
+    │   Spike handled: no OOM. After spike, optimizer states page back to GPU.             │
     │                                                                                      │
     └──────────────────────────────────────────────────────────────────────────────────────┘
 

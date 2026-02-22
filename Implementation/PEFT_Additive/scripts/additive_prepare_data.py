@@ -94,7 +94,7 @@ def tokenize_with_response_masking(
     │  1. Tokenize just the prompt (no response)                           │
     │  2. len(prompt_tokens) = N                                           │
     │  3. labels[:N] = -100   (mask everything up to and including prompt) │
-    │  4. labels[N:] = input_ids[N:]  (response contributes to loss)      │
+    │  4. labels[N:] = input_ids[N:]  (response contributes to loss)       │
     └──────────────────────────────────────────────────────────────────────┘
     """
     prompt, response = format_prompt(example)
@@ -148,6 +148,13 @@ def prepare_datasets(config_path: str = None) -> tuple[Dataset, Dataset, AutoTok
          → filter()                : remove examples with no response tokens
          → return                  : HuggingFace Datasets ready for Trainer
     """
+    # if config_path is None:
+    #     config_path = Path(__file__).parent / "additive_training_config.yaml"
+    #
+    # with open(config_path) as f:
+    #     config = yaml.safe_load(f)
+    #
+
     if config_path is None:
         config_path = Path(__file__).parent.parent / "configs" / "additive_training_config.yaml"
 

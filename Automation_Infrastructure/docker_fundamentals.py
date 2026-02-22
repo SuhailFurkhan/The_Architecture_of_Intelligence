@@ -39,45 +39,45 @@ laptop, a teammate's machine, a CI server, or a production cluster.
 
 ### Key Terminology
 
-| Term              | Definition                                                            |
-|-------------------|-----------------------------------------------------------------------|
-| **Image**         | A read-only blueprint/template. Like a class in OOP.                 |
+| Term              | Definition                                                             |
+|-------------------|------------------------------------------------------------------------|
+| **Image**         | A read-only blueprint/template. Like a class in OOP.                   |
 | **Container**     | A running instance of an image. Like an object instantiated from class.|
-| **Dockerfile**    | A text file with instructions to build an image. The "recipe."        |
-| **Layer**         | Each instruction in a Dockerfile creates a cached, reusable layer.    |
-| **Registry**      | A storage/distribution system for images (Docker Hub, ECR, GCR).     |
-| **Volume**        | Persistent storage that survives container restarts/removal.          |
-| **Network**       | Virtual network allowing containers to communicate with each other.   |
-| **Compose**       | Tool to define and run multi-container apps via a YAML file.          |
+| **Dockerfile**    | A text file with instructions to build an image. The "recipe."         |
+| **Layer**         | Each instruction in a Dockerfile creates a cached, reusable layer.     |
+| **Registry**      | A storage/distribution system for images (Docker Hub, ECR, GCR).       |
+| **Volume**        | Persistent storage that survives container restarts/removal.           |
+| **Network**       | Virtual network allowing containers to communicate with each other.    |
+| **Compose**       | Tool to define and run multi-container apps via a YAML file.           |
 
 ### Architecture Overview
 
 ```
     ┌─────────────────────────────────────────────────────────────┐
-    │                        Docker Engine                         │
+    │                        Docker Engine                        │
     │                                                             │
-    │   ┌──────────┐    ┌──────────┐    ┌──────────┐             │
-    │   │Container 1│    │Container 2│    │Container 3│            │
-    │   │ (Python)  │    │ (Postgres)│    │  (Redis)  │            │
-    │   └─────┬────┘    └─────┬────┘    └─────┬────┘             │
-    │         │               │               │                   │
-    │         └───────────────┼───────────────┘                   │
-    │                         │                                   │
-    │                 ┌───────┴───────┐                           │
-    │                 │ Docker Network │                           │
-    │                 └───────────────┘                           │
+    │   ┌───────────┐    ┌───────────┐    ┌───────────┐           │
+    │   │Container 1│    │Container 2│    │Container 3│           │
+    │   │ (Python)  │    │ (Postgres)│    │  (Redis)  │           │
+    │   └─────┬─────┘    └──────┬────┘    └─────┬─────┘           │
+    │         │                 │               │                 │
+    │         └─────────────────┼───────────────┘                 │
+    │                           │                                 │
+    │                 ┌─────────┴───────┐                         │
+    │                 │ Docker Network  │                         │
+    │                 └─────────────────┘                         │
     │                                                             │
-    │   ┌─────────────┐    ┌─────────────┐                       │
+    │   ┌──────────────┐    ┌──────────────┐                      │
     │   │   Volumes    │    │   Images     │                      │
     │   │ (persistent) │    │  (registry)  │                      │
-    │   └─────────────┘    └─────────────┘                       │
+    │   └──────────────┘    └──────────────┘                      │
     │                                                             │
     └─────────────────────────────────────────────────────────────┘
             │
             ▼
-    ┌───────────────┐
+    ┌────────────────┐
     │   Host OS      │   (Linux kernel / Docker Desktop on Mac/Win)
-    └───────────────┘
+    └────────────────┘
 ```
 
 ### Container vs Virtual Machine
@@ -142,10 +142,10 @@ COMMANDS = """
 | `docker run --name myapp image`           | Name the container                        |
 | `docker run -e KEY=VAL image`             | Set environment variable                  |
 | `docker run --rm image`                   | Auto-remove when stopped                  |
-| `docker run -it image bash`              | Interactive terminal                      |
+| `docker run -it image bash`               | Interactive terminal                      |
 | `docker ps`                               | List running containers                   |
 | `docker ps -a`                            | List ALL containers (inc. stopped)        |
-| `docker stop container`                   | Graceful stop (SIGTERM → SIGKILL)        |
+| `docker stop container`                   | Graceful stop (SIGTERM → SIGKILL)         |
 | `docker kill container`                   | Force stop (SIGKILL)                      |
 | `docker rm container`                     | Remove stopped container                  |
 | `docker logs container`                   | View container stdout/stderr              |
@@ -167,11 +167,11 @@ COMMANDS = """
 
 ### Cleanup Commands
 
-| Command                                   | What it does                              |
-|-------------------------------------------|-------------------------------------------|
+| Command                                   | What it does                                            |
+|-------------------------------------------|---------------------------------------------------------|
 | `docker system prune`                     | Remove stopped containers, unused nets, dangling images |
-| `docker system prune -a`                  | ↑ plus ALL unused images                  |
-| `docker system df`                        | Show disk usage                           |
+| `docker system prune -a`                  | ↑ plus ALL unused images                                |
+| `docker system df`                        | Show disk usage                                         |
 """
 
 # ─────────────────────────────────────────────────────────────────────────────

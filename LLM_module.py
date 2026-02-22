@@ -186,10 +186,8 @@ Always provide clear explanations that connect visuals to underlying concepts.""
             model: Specific model to use (uses default if not specified)
             env_file: Path to .env file to load API keys from
         """
-        if env_file or api_key is None:
-            self._loaded_env = load_env_file(env_file)
-        else:
-            self._loaded_env = {}
+        # Always load Keys.env so _get_api_key always has the freshest value
+        self._loaded_env = load_env_file(env_file)
 
         self.provider = LLMProvider(provider.lower())
         self.api_key = api_key
@@ -206,19 +204,23 @@ Always provide clear explanations that connect visuals to underlying concepts.""
             self.model = self.default_models.get(self.provider)
 
     def _get_api_key(self) -> Optional[str]:
-        """Get API key from instance, loaded env, or system environment."""
-        if self.api_key:
-            return self.api_key
-
+        """
+        Get API key — Keys.env always takes priority over session state.
+        Priority: Keys.env file → system env → passed-in api_key argument.
+        """
         env_vars = {
             LLMProvider.ANTHROPIC: "ANTHROPIC_API_KEY",
-            LLMProvider.OPENAI: "OPENAI_API_KEY",
+            LLMProvider.OPENAI:    "OPENAI_API_KEY",
         }
-
         env_var = env_vars.get(self.provider)
         if env_var:
-            return self._loaded_env.get(env_var) or os.environ.get(env_var)
-        return None
+            from_file = self._loaded_env.get(env_var)
+            if from_file:
+                return from_file
+            from_sys = os.environ.get(env_var)
+            if from_sys:
+                return from_sys
+        return self.api_key if self.api_key else None
 
     def _init_anthropic_client(self):
         """Initialize Anthropic client."""
@@ -569,6 +571,171 @@ This is a mock response for testing image analysis. To get real AI analysis:
 # =============================================================================
 # UTILITY FUNCTIONS
 # =============================================================================
+
+
+# =============================================================================
+# API KEY VALIDATION & AUTO-SELECTION
+# =============================================================================
+
+@dataclass
+class KeyStatus:
+    """Validation result for a single API key."""
+    provider:     str
+    key_name:     str
+    key_preview:  str
+    present:      bool
+    valid:        bool
+    model:        Optional[str]
+    hf_username:  Optional[str] = None
+    error:        Optional[str] = None
+
+
+def _make_key_preview(value: str) -> str:
+    if not value or len(value) < 12:
+        return "***"
+    return f"{value[:8]}...{value[-4:]}"
+
+
+def _validate_anthropic_key(key: str) -> KeyStatus:
+    model   = "claude-haiku-4-5-20251001"
+    preview = _make_key_preview(key)
+    try:
+        from anthropic import Anthropic, AuthenticationError, PermissionDeniedError
+        client = Anthropic(api_key=key)
+        client.messages.create(
+            model=model, max_tokens=1,
+            messages=[{"role": "user", "content": "Hi"}],
+        )
+        return KeyStatus(provider="anthropic", key_name="ANTHROPIC_API_KEY",
+                         key_preview=preview, present=True, valid=True, model=model)
+    except Exception as e:
+        err = str(e)
+        if "rate" in err.lower() or "529" in err:   # rate-limited = key IS valid
+            return KeyStatus(provider="anthropic", key_name="ANTHROPIC_API_KEY",
+                             key_preview=preview, present=True, valid=True, model=model)
+        msg = "401 — Key invalid or revoked" if "401" in err else \
+              "403 — Key lacks permissions"  if "403" in err else \
+              "anthropic package not installed" if "ImportError" in err else err
+        return KeyStatus(provider="anthropic", key_name="ANTHROPIC_API_KEY",
+                         key_preview=preview, present=True, valid=False,
+                         model=None, error=msg)
+
+
+def _validate_openai_key(key: str) -> KeyStatus:
+    model   = "gpt-4o-mini"
+    preview = _make_key_preview(key)
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=key)
+        client.models.list()
+        return KeyStatus(provider="openai", key_name="OPENAI_API_KEY",
+                         key_preview=preview, present=True, valid=True, model=model)
+    except Exception as e:
+        err = str(e)
+        if "rate" in err.lower():
+            return KeyStatus(provider="openai", key_name="OPENAI_API_KEY",
+                             key_preview=preview, present=True, valid=True, model=model)
+        msg = "401 — Key invalid or revoked" if "401" in err else \
+              "openai package not installed"  if "ImportError" in err else err
+        return KeyStatus(provider="openai", key_name="OPENAI_API_KEY",
+                         key_preview=preview, present=True, valid=False,
+                         model=None, error=msg)
+
+
+def _validate_hf_key(key: str) -> KeyStatus:
+    preview = _make_key_preview(key)
+    try:
+        import urllib.request, json as _json
+        req = urllib.request.Request(
+            "https://huggingface.co/api/whoami",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = _json.loads(resp.read())
+        return KeyStatus(provider="huggingface", key_name="HF_TOKEN",
+                         key_preview=preview, present=True, valid=True,
+                         model="HuggingFace Hub", hf_username=data.get("name", "unknown"))
+    except Exception as e:
+        err = str(e)
+        msg = "401 — Token invalid or expired" if "401" in err else err
+        return KeyStatus(provider="huggingface", key_name="HF_TOKEN",
+                         key_preview=preview, present=True, valid=False,
+                         model=None, error=msg)
+
+
+def _absent(provider: str, key_name: str) -> KeyStatus:
+    return KeyStatus(provider=provider, key_name=key_name,
+                     key_preview="not set", present=False, valid=False,
+                     model=None, error="Key not found in Keys.env")
+
+
+def validate_all_keys(env_file: str = None) -> dict:
+    """
+    Validate ANTHROPIC_API_KEY, OPENAI_API_KEY, and HF_TOKEN.
+    Returns {key_name: KeyStatus} for all three regardless of presence.
+    """
+    env_vars = load_env_file(env_file)
+
+    def _get(name):
+        return env_vars.get(name) or os.environ.get(name)
+
+    ant_key = _get("ANTHROPIC_API_KEY")
+    oai_key = _get("OPENAI_API_KEY")
+    hf_key  = _get("HF_TOKEN")
+
+    return {
+        "ANTHROPIC_API_KEY": _validate_anthropic_key(ant_key) if ant_key else _absent("anthropic", "ANTHROPIC_API_KEY"),
+        "OPENAI_API_KEY":    _validate_openai_key(oai_key)    if oai_key else _absent("openai",    "OPENAI_API_KEY"),
+        "HF_TOKEN":          _validate_hf_key(hf_key)         if hf_key  else _absent("huggingface", "HF_TOKEN"),
+    }
+
+
+def auto_select_provider(env_file: str = None) -> dict:
+    """
+    Live-validate both Anthropic and OpenAI keys and return the best provider.
+
+    Priority:
+        1. Anthropic  — preferred when valid
+        2. OpenAI     — fallback if Anthropic is invalid/absent
+        3. mock       — if neither key is valid
+
+    Returns:
+        {
+            "provider":  "anthropic" | "openai" | "mock",
+            "model":     str | None,
+            "reason":    str,
+            "anthropic": KeyStatus,
+            "openai":    KeyStatus,
+        }
+    """
+    env_vars = load_env_file(env_file)
+
+    def _get(name):
+        return env_vars.get(name) or os.environ.get(name)
+
+    ant_key = _get("ANTHROPIC_API_KEY")
+    oai_key = _get("OPENAI_API_KEY")
+
+    ant = _validate_anthropic_key(ant_key) if ant_key else _absent("anthropic", "ANTHROPIC_API_KEY")
+    oai = _validate_openai_key(oai_key)    if oai_key else _absent("openai",    "OPENAI_API_KEY")
+
+    if ant.valid and oai.valid:
+        return {"provider": "anthropic", "model": ant.model,
+                "reason": "Both keys valid — using Anthropic (preferred)",
+                "anthropic": ant, "openai": oai}
+    elif ant.valid:
+        return {"provider": "anthropic", "model": ant.model,
+                "reason": "Anthropic key valid",
+                "anthropic": ant, "openai": oai}
+    elif oai.valid:
+        return {"provider": "openai", "model": oai.model,
+                "reason": "OpenAI key valid (Anthropic unavailable)",
+                "anthropic": ant, "openai": oai}
+    else:
+        return {"provider": "mock", "model": None,
+                "reason": "No valid keys found — using mock mode",
+                "anthropic": ant, "openai": oai}
+
 
 def get_available_providers() -> list:
     """Get list of available providers based on installed packages."""
